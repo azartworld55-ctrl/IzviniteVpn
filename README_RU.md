@@ -10,7 +10,7 @@ Flutter Android-клиент на sing_box и отдельный Node.js API а�
 
 ## Перед первой сборкой
 1. Размести папку backend на сервере с Node.js 22 и постоянным диском для SQLite.
-2. Настрой переменные окружения из backend/.env.example: ADMIN_USERNAME (выбранный тобой ник), ADMIN_BOOTSTRAP_KEY (временный ключ), JWT_SECRET (случайная строка минимум 32 символа), DATABASE_FILE.
+2. Настрой переменные окружения из backend/.env.example: ADMIN_USERNAME=Aqsone, ADMIN_BOOTSTRAP_KEY (временный ключ), JWT_SECRET (случайная строка минимум 32 символа), DATABASE_FILE.
 3. Первоначальный ключ должен быть установлен в переменную окружения хостинга; после первого входа приложение потребует заменить его на пароль длиной не менее 12 символов.
 4. Включи HTTPS. Не сохраняй секреты в GitHub.
 5. В GitHub Settings → Secrets and variables → Actions → Variables добавь API_BASE_URL — HTTPS-адрес API без завершающего слеша.
