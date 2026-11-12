@@ -4,7 +4,9 @@ name: Build IzviniteVpn APK
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master, feature/izvinitevpn-v2 ]
+    branches: [ main, master, feature/izvinitevpn-v2, fix/vpn-ui-admin-cleanup ]
+  pull_request:
+    branches: [ main ]
 
 concurrency:
   group: izvinitevpn-${{ github.workflow }}-${{ github.ref }}
@@ -26,6 +28,8 @@ jobs:
         with:
           channel: stable
           cache: true
+      - name: Validate Cloudflare Worker syntax
+        run: node --check cloudflare/src/index.js
       - name: Generate Android project
         run: |
           flutter create --platforms=android --org ru.yusupov --project-name izvinitevpn build_src
