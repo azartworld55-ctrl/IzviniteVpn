@@ -43,6 +43,7 @@ class Api {
       throw const ApiUnavailableException('Сервер авторизации недоступен. Проверь подключение к интернету.');
     }
     final d=r.body.isEmpty?<String,dynamic>{}:jsonDecode(r.body) as Map<String,dynamic>;
+    if (r.statusCode >= 500) throw const ApiUnavailableException('Сервер авторизации временно недоступен.');
     if(r.statusCode<200 || r.statusCode>=300) throw Exception(d['error']??'Ошибка сервера');
     return d;
   }
@@ -221,7 +222,7 @@ class _HomeState extends SessionState<HomePage> {
   String down = '0 B/s', up = '0 B/s';
   String? error, vpnError, selected, activeServer;
   bool loadingSubscription = false, checkingPing = false, connecting = false;
-  bool sortedByPing = false, isAdmin = false;
+  bool sortedByPing = false, isAdmin = false, disconnectingNow = false;
   SingBoxConnectionStatus vpnStatus = SingBox.instance.status;
 
   bool get connected => vpnStatus == SingBoxConnectionStatus.connected;
@@ -409,14 +410,14 @@ class _HomeState extends SessionState<HomePage> {
   Future<void> disconnectVpn() async {
     if (connecting) return;
     HapticFeedback.selectionClick();
-    setState(() { connecting = true; vpnError = null; });
+    setState(() { connecting = true; disconnectingNow = true; vpnError = null; });
     try {
       await SingBox.instance.disconnect();
       if (mounted) setState(() => activeServer = null);
     } catch (e) {
       if (mounted) setState(() => vpnError = e.toString());
     } finally {
-      if (mounted) setState(() => connecting = false);
+      if (mounted) setState(() { connecting = false; disconnectingNow = false; });
     }
   }
 
@@ -444,6 +445,8 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   String get statusLabel {
+    if (disconnectingNow) return 'Отключение…';
+    if (connecting && vpnStatus != SingBoxConnectionStatus.connected) return 'Подключение…';
     if (vpnError != null && vpnStatus != SingBoxConnectionStatus.connected) return 'Ошибка';
     switch (vpnStatus) {
       case SingBoxConnectionStatus.connecting: return 'Подключение…';
