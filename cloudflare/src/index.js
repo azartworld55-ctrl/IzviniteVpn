@@ -109,7 +109,7 @@ async function handle(request,env) {
   if(method==="POST" && path==="/api/auth/change-password") {
     let u; try {u=await currentUser(request,env,false,true);} catch(e) {if(e instanceof Response)return json({error:await e.text()},e.status);throw e;}
     const body=await request.json(), current=String(body.currentKey||""), next=String(body.newKey||"");
-    if(!(await passwordVerify(current,u.key_hash))) return json({error:"Текущий пароль не подходит"},401);
+    if(!(await passwordVerify(current,u.key_hash,env))) return json({error:"Текущий пароль не подходит"},401);
     if(next.length<12||next.length>128) return json({error:"Пароль должен содержать от 12 до 128 символов"},400);
     const hash=await passwordHash(next);
     await env.DB.prepare("UPDATE users SET key_hash=?,key_fingerprint=?,must_change_password=0 WHERE id=?").bind(hash,await fingerprint(next),u.id).run();
@@ -127,10 +127,10 @@ async function handle(request,env) {
   }
   if(method==="GET" && path==="/api/admin/users") {
     const q=String(url.searchParams.get("q")||"").trim(); let rows;
-    if(!q) rows=(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' ORDER BY created_at DESC LIMIT 300").all()).results;
+    if(!q) rows=(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND key_hash<>'' ORDER BY created_at DESC LIMIT 300").all()).results;
     else {
-      const byName=(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND username LIKE ? COLLATE NOCASE LIMIT 100").bind("%"+q.slice(0,80)+"%").all()).results;
-      const byKey=q.length>=8?(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND key_fingerprint=? LIMIT 20").bind(await fingerprint(q)).all()).results:[];
+      const byName=(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND key_hash<>'' AND username LIKE ? COLLATE NOCASE LIMIT 100").bind("%"+q.slice(0,80)+"%").all()).results;
+      const byKey=q.length>=8?(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND key_hash<>'' AND key_fingerprint=? LIMIT 20").bind(await fingerprint(q)).all()).results:[];
       rows=[...new Map([...byName,...byKey].map(x=>[x.id,x])).values()];
     }
     return json({users:await Promise.all(rows.map(async x=>({id:x.id,username:x.username,status:userStatus(x),expiresAt:x.expires_at,maxDevices:x.max_devices,deviceCount:x.device_count,key:await decryptUserKey(x.key_hash,env)})))});
@@ -138,7 +138,7 @@ async function handle(request,env) {
   if(method==="POST" && path==="/api/admin/users") {
     const body=await request.json(), username=String(body.username||"").trim(), days=Number(body.days), maxDevices=Number(body.maxDevices);
     if(!/^[\p{L}\p{N}_.-]{3,32}$/u.test(username)) return json({error:"Ник: 3–32 буквы, цифры, точка, дефис или подчёркивание"},400);
-    if(![0,7,30,90].includes(days)||![1,2].includes(maxDevices)) return json({error:"Недопустимые параметры ключа"},400);
+    if(![0,1,2,7,30,90].includes(days)||![1,2].includes(maxDevices)) return json({error:"Недопустимые параметры ключа"},400);
     const suppliedKey=String(body.key||"").trim();
     if(suppliedKey && (suppliedKey.length<12 || suppliedKey.length>128)) return json({error:"Ключ должен содержать от 12 до 128 символов"},400);
     const newKey=suppliedKey || b64u(crypto.getRandomValues(new Uint8Array(32))), hash=await encryptUserKey(newKey,env), expires=days===0?null:new Date(Date.now()+days*86400000).toISOString();
@@ -160,12 +160,14 @@ async function handle(request,env) {
   }
   const keyMatch=path.match(/^\/api\/admin\/users\/(\d+)\/key$/);
   if(method==="PATCH" && keyMatch) {
-    const body=await request.json(), next=String(body.key||"").trim();
+    const body=await request.json(), next=String(body.key||"").trim(), days=Number(body.days);
     if(next.length<12 || next.length>128) return json({error:"Ключ должен содержать от 12 до 128 символов"},400);
+    if(![0,1,2,7,30,90].includes(days)) return json({error:"Недопустимый срок доступа"},400);
     const id=Number(keyMatch[1]), target=await env.DB.prepare("SELECT username FROM users WHERE id=? AND role='user'").bind(id).first();
     if(!target) return json({error:"Пользователь не найден"},404);
-    await env.DB.prepare("UPDATE users SET key_hash=?,key_fingerprint=?,status='active' WHERE id=? AND role='user'").bind(await encryptUserKey(next,env),await fingerprint(next),id).run();
-    await event(env,"key_reset","Ключ обновлён: "+target.username);
+    const expires=days===0?null:new Date(Date.now()+days*86400000).toISOString();
+    await env.DB.prepare("UPDATE users SET key_hash=?,key_fingerprint=?,status='active',expires_at=? WHERE id=? AND role='user'").bind(await encryptUserKey(next,env),await fingerprint(next),expires,id).run();
+    await event(env,"key_reset","Ключ обновлён: "+target.username+"; срок: "+(days===0?"без ограничения":days+" дн."));
     return json({ok:true});
   }
   const revokeMatch=path.match(/^\/api\/admin\/users\/(\d+)\/revoke$/);
@@ -180,12 +182,22 @@ async function handle(request,env) {
     const rows=(await env.DB.prepare("SELECT id,type,message,created_at,created_at AS createdAt FROM events ORDER BY id DESC LIMIT 100").all()).results;
     return json({events:rows});
   }
+  if(method==="DELETE" && path==="/api/admin/events") {
+    await env.DB.prepare("DELETE FROM events").run();
+    return json({ok:true});
+  }
+  const eventMatch=path.match(/^\\/api\\/admin\\/events\\/(\\d+)$/);
+  if(method==="DELETE" && eventMatch) {
+    const r=await env.DB.prepare("DELETE FROM events WHERE id=?").bind(Number(eventMatch[1])).run();
+    if(!r.meta.changes) return json({error:"Уведомление не найдено"},404);
+    return json({ok:true});
+  }
   return json({error:"Not found"},404);
 }
 export default {
   async fetch(request,env) {
     try {
-      if(request.method==="OPTIONS") return new Response(null,{status:204,headers:{ "access-control-allow-origin":"*", "access-control-allow-methods":"GET,POST,PATCH,OPTIONS", "access-control-allow-headers":"authorization,content-type" }});
+      if(request.method==="OPTIONS") return new Response(null,{status:204,headers:{ "access-control-allow-origin":"*", "access-control-allow-methods":"GET,POST,PATCH,DELETE,OPTIONS", "access-control-allow-headers":"authorization,content-type" }});
       const response=await handle(request,env);
       const headers=new Headers(response.headers);
       headers.set("access-control-allow-origin","*");
