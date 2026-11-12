@@ -159,6 +159,7 @@ export default {
       headers.set("access-control-allow-headers","authorization,content-type");
       return new Response(response.body,{status:response.status,headers});
     } catch(error) {
+      console.error("IZVINITEVPN ERROR:", error?.stack || error?.message || String(error));
       return json({error:"Внутренняя ошибка сервера"},500);
     }
   }
