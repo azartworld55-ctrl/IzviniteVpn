@@ -237,15 +237,34 @@ class HomePage extends StatefulWidget {
 class _HomeState extends SessionState<HomePage> {
   List<SingBoxServerConfig> servers = [];
   final Map<String, int> ping = {};
-  StreamSubscription<dynamic>? pinger, statsSub, statusSub, stateSub, groupsSub;
+  StreamSubscription<dynamic>? statsSub, statusSub, stateSub, groupsSub, logSub;
   String down = '0 B/s', up = '0 B/s';
-  String? error, vpnError, selected, activeServer;
+  String? error, vpnError, coreDiagnostic, selected, activeServer;
   bool loadingSubscription = false, checkingPing = false, connecting = false;
   bool sortedByPing = false, isAdmin = false, disconnectingNow = false;
   SingBoxConnectionStatus vpnStatus = SingBox.instance.status;
 
   bool get connected => vpnStatus == SingBoxConnectionStatus.connected;
-  bool get busy => connecting || loadingSubscription;
+  bool get busy => connecting || loadingSubscription || checkingPing;
+
+  // Mirror sing_box.connectToServers() tag generation so duplicate display
+  // names still map back to their stable profile IDs.
+  Map<String, SingBoxServerConfig> get _serverByOutboundTag {
+    final result = <String, SingBoxServerConfig>{};
+    final usedTags = <String>{SingBoxConfigBuilder.proxyTag, SingBoxConfigBuilder.autoTag, SingBoxConfigBuilder.directTag};
+    for (final server in servers) {
+      if (!server.enabled || server.outbound == null) continue;
+      var tag = server.name.isNotEmpty ? server.name : server.id;
+      if (usedTags.contains(tag)) {
+        var index = 2;
+        while (usedTags.contains('$tag ($index)')) { index++; }
+        tag = '$tag ($index)';
+      }
+      usedTags.add(tag);
+      result[tag] = server;
+    }
+    return result;
+  }
 
   @override void initState() {
     super.initState();
@@ -262,28 +281,31 @@ class _HomeState extends SessionState<HomePage> {
       if (state.error != null && mounted) setState(() => vpnError = state.error.toString());
     });
     groupsSub = SingBox.instance.watchGroups().listen((groups) {
-      for (final group in groups) {
-        if (group.tag == SingBoxConfigBuilder.proxyTag) {
-          var value = group.selected?.toString();
-          if (value == SingBoxConfigBuilder.autoTag) {
-            final autoGroup = groups.where((item) => item.tag == SingBoxConfigBuilder.autoTag).toList();
-            if (autoGroup.isNotEmpty) value = autoGroup.first.selected?.toString();
-          }
-          if (value != null && value.isNotEmpty && value != SingBoxConfigBuilder.autoTag && mounted) {
-            setState(() {
-              activeServer = value;
-              final found = servers.where((server) => server.name == value).toList();
-              if (found.isNotEmpty) selected = found.first.id;
-            });
-          }
-        }
+      final proxyGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.proxyTag).toList();
+      if (proxyGroups.isEmpty) return;
+      var value = proxyGroups.first.selected?.toString();
+      if (value == SingBoxConfigBuilder.autoTag) {
+        final autoGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.autoTag).toList();
+        if (autoGroups.isNotEmpty) value = autoGroups.first.selected?.toString();
       }
+      if (value == null || value.isEmpty || value == SingBoxConfigBuilder.autoTag || !mounted) return;
+      final server = _serverByOutboundTag[value];
+      setState(() {
+        activeServer = value;
+        if (server != null) selected = server.id;
+      });
     });
     statsSub = SingBox.instance.watchConnectionStats().listen((stats) {
-      if (mounted) setState(() {
+      if (!mounted) return;
+      setState(() {
         down = rate(stats.downloadSpeed);
         up = rate(stats.uploadSpeed);
       });
+    });
+    logSub = SingBox.instance.watchLogs().listen((entry) {
+      if (entry.level.index >= SingBoxLogLevel.warn.index && mounted) {
+        setState(() => coreDiagnostic = entry.plainMessage);
+      }
     });
     loadRole();
     loadServers();
@@ -359,6 +381,7 @@ class _HomeState extends SessionState<HomePage> {
       if (loaded.isEmpty) throw Exception('Подписка не содержит поддерживаемых серверов');
       if (mounted) setState(() {
         servers = loaded;
+        ping.clear();
         if (selected == null || !servers.any((server) => server.id == selected)) selected = servers.first.id;
         sortedByPing = false;
       });
@@ -370,16 +393,59 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> testPings() async {
-    if (servers.isEmpty || checkingPing) return;
-    await pinger?.cancel();
-    if (mounted) setState(() { checkingPing = true; ping.clear(); });
-    pinger = SingBox.instance.pingServers(servers, concurrency: 8).listen(
-      (result) {
-        if (mounted) setState(() => ping[result.serverId ?? ''] = result.success ? result.ping : -1);
-      },
-      onError: (e) { if (mounted) setState(() => error = 'Ошибка проверки МС: ' + e.toString()); },
-      onDone: () { if (mounted) setState(() { checkingPing = false; sortedByPing = false; }); },
-    );
+    if (servers.isEmpty || checkingPing || connecting || vpnStatus == SingBoxConnectionStatus.connecting) return;
+    final wasConnected = SingBox.instance.status == SingBoxConnectionStatus.connected;
+    if (!wasConnected) {
+      final proceed = await showDialog<bool>(context: context, builder: (dialogContext) => AlertDialog(
+        title: const Text('Проверка серверов'),
+        content: const Text('Чтобы проверить реальную работу прокси, приложение временно подключит VPN со списком серверов, проверит их и отключит туннель. Во время проверки интернет пойдёт через VPN.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Начать')),
+        ],
+      ));
+      if (proceed != true || !mounted) return;
+    }
+    if (!await ensureSession()) return;
+    if (mounted) setState(() { checkingPing = true; ping.clear(); error = null; });
+    try {
+      if (!wasConnected) {
+        await SingBox.instance.connectToServers(servers, selectedId: selected);
+        await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
+      }
+      final initialGroups = await SingBox.instance.watchGroups().first.timeout(const Duration(seconds: 8));
+      final hasAutoGroup = initialGroups.any((item) => item.tag == SingBoxConfigBuilder.autoTag && item.type == 'urltest');
+      if (hasAutoGroup) {
+        final testedAt = DateTime.now().subtract(const Duration(seconds: 1));
+        final group = await SingBox.instance.testGroup(
+          SingBoxConfigBuilder.autoTag,
+          timeout: const Duration(seconds: 90),
+        );
+        if (group == null) throw Exception('Не удалось получить результаты проверки серверов.');
+        final byTag = _serverByOutboundTag;
+        for (final item in group.items) {
+          final server = byTag[item.tag];
+          if (server != null && item.urlTestTime != null && !item.urlTestTime!.isBefore(testedAt) && mounted) {
+            setState(() => ping[server.id] = item.urlTestDelay ?? -1);
+          }
+        }
+      } else {
+        // A single-server configuration has no auto URL-test group.
+        final tag = await SingBox.instance.currentOutboundTag();
+        if (tag == null) throw Exception('Не удалось определить активный прокси-сервер.');
+        final result = await SingBox.instance.pingOutbound(tag, timeout: const Duration(seconds: 20));
+        final server = _serverByOutboundTag[tag];
+        if (server != null && mounted) setState(() => ping[server.id] = result.success ? result.ping : -1);
+      }
+      if (mounted) setState(() => sortedByPing = false);
+    } catch (e) {
+      if (mounted) setState(() => error = 'Не удалось проверить серверы: ' + e.toString());
+    } finally {
+      if (!wasConnected && SingBox.instance.status != SingBoxConnectionStatus.disconnected) {
+        try { await SingBox.instance.disconnect(); } catch (_) {}
+      }
+      if (mounted) setState(() => checkingPing = false);
+    }
   }
 
   void sortByPing() => setState(() => sortedByPing = true);
@@ -398,7 +464,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> toggleConnection({bool auto = false}) async {
-    if (connecting) return;
+    if (connecting || checkingPing) return;
     if (connected || vpnStatus == SingBoxConnectionStatus.connecting) {
       await disconnectVpn();
       return;
@@ -409,15 +475,10 @@ class _HomeState extends SessionState<HomePage> {
     }
     if (!await ensureSession()) return;
     HapticFeedback.mediumImpact();
-    setState(() { connecting = true; vpnError = null; });
+    setState(() { connecting = true; vpnError = null; coreDiagnostic = null; });
     try {
-      await SingBox.instance.connectToServers(servers);
-      if (auto) {
-        await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag, SingBoxConfigBuilder.autoTag);
-      } else {
-        final server = servers.firstWhere((item) => item.id == selected, orElse: () => servers.first);
-        await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag, server.name);
-      }
+      final selectedId = auto ? null : (selected ?? servers.first.id);
+      await SingBox.instance.connectToServers(servers, selectedId: selectedId);
       await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
     } catch (e) {
       if (mounted) setState(() => vpnError = e.toString());
@@ -427,7 +488,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> disconnectVpn() async {
-    if (connecting) return;
+    if (connecting || checkingPing) return;
     HapticFeedback.selectionClick();
     setState(() { connecting = true; disconnectingNow = true; vpnError = null; });
     try {
@@ -441,25 +502,35 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> chooseServer(SingBoxServerConfig server) async {
+    if (connecting || checkingPing) return;
     HapticFeedback.selectionClick();
-    setState(() => selected = server.id);
+    setState(() { selected = server.id; if (connected) connecting = true; vpnError = null; });
     try {
       if (connected) {
-        await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag, server.name);
-        if (mounted) setState(() { activeServer = server.name; vpnError = null; });
+        // Resolve the plugin-generated tag from the stable profile ID. This
+        // keeps switching instant and handles duplicate display names.
+        String? outboundTag;
+        for (final entry in _serverByOutboundTag.entries) {
+          if (entry.value.id == server.id) { outboundTag = entry.key; break; }
+        }
+        if (outboundTag == null) throw Exception('Не удалось найти сервер в активной конфигурации.');
+        await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag, outboundTag);
+        if (mounted) setState(() => activeServer = outboundTag);
       }
       if (mounted) Navigator.pop(context);
     } catch (e) {
       if (mounted) setState(() => vpnError = e.toString());
+    } finally {
+      if (mounted) setState(() => connecting = false);
     }
   }
 
   @override void dispose() {
-    pinger?.cancel();
     statsSub?.cancel();
     statusSub?.cancel();
     stateSub?.cancel();
     groupsSub?.cancel();
+    logSub?.cancel();
     super.dispose();
   }
 
@@ -580,6 +651,8 @@ class _HomeState extends SessionState<HomePage> {
           child: Text(error!, style: const TextStyle(color: Colors.redAccent))),
         if (vpnError != null) Padding(padding: const EdgeInsets.only(top: 12),
           child: Text(vpnError!, style: const TextStyle(color: Colors.redAccent))),
+        if (coreDiagnostic != null) Padding(padding: const EdgeInsets.only(top: 8),
+          child: Text('Диагностика sing-box: $coreDiagnostic', style: const TextStyle(color: Colors.orangeAccent, fontSize: 12))),
         const SizedBox(height: 20),
         const Text('Автор: Юсупов И.', textAlign: TextAlign.center, style: TextStyle(color: Colors.white30, fontSize: 11)),
       ]),
@@ -610,8 +683,8 @@ class _HomeState extends SessionState<HomePage> {
             child: Text('Выбор сервера', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800))),
           Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Wrap(
             alignment: WrapAlignment.center, spacing: 6, children: [
-              TextButton.icon(onPressed: checkingPing ? null : () { testPings(); refreshSheet(() {}); },
-                icon: const Icon(Icons.speed, size: 18), label: const Text('Проверить МС')),
+              TextButton.icon(onPressed: checkingPing || connecting ? null : () { testPings(); refreshSheet(() {}); },
+                icon: const Icon(Icons.speed, size: 18), label: const Text('Проверить серверы')),
               TextButton.icon(onPressed: loadingSubscription ? null : () async { await loadServers(); refreshSheet(() {}); },
                 icon: const Icon(Icons.refresh, size: 18), label: const Text('Обновить подписку')),
               TextButton.icon(onPressed: () { sortByPing(); refreshSheet(() {}); },
@@ -641,8 +714,8 @@ class _HomeState extends SessionState<HomePage> {
                       if (active) const Icon(Icons.check_circle, color: orange, size: 18)]),
                     Text(countryFor(server.name), maxLines: 2, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontWeight: FontWeight.w700)),
-                    Text(latency == null ? 'МС: —' : latency < 0 ? 'Недоступен' : latency.toString() + ' мс',
-                      style: TextStyle(fontSize: 12, color: latency != null && latency >= 0 ? Colors.greenAccent : Colors.white54)),
+                    Text(latency == null ? 'Не проверен' : latency < 0 ? 'Не прошёл тест' : 'Работает · $latency мс',
+                      style: TextStyle(fontSize: 12, color: latency != null && latency >= 0 ? Colors.greenAccent : latency != null ? Colors.redAccent : Colors.white54)),
                   ]),
                 ),
               );
@@ -946,4 +1019,3 @@ class _AdminState extends SessionState<AdminPage> {
     ]),
   );
 }
-
