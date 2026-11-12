@@ -1,10 +1,12 @@
 name: Build IzviniteVpn APK
-# Trigger APK build after the auth API compatibility fix.
+# Build and validate every update to the VPN feature branch.
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [ main ]
   push:
-    branches: [ main, master, feature/izvinitevpn-v2 ]
+    branches: [ main, master, feature/izvinitevpn-v2, feature/vpn-ui-admin-complete ]
 
 concurrency:
   group: izvinitevpn-${{ github.workflow }}-${{ github.ref }}
@@ -18,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check patch formatting
+        run: git diff --check
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -40,6 +44,8 @@ jobs:
           cp android-icon/colors.xml build_src/android/app/src/main/res/values/ic_launcher_colors.xml
           cd build_src
           flutter pub get
+      - name: Validate Worker JavaScript
+        run: node --check cloudflare/src/index.js
       - name: Validate API endpoint
         env:
           API_BASE_URL: ${{ vars.API_BASE_URL }}
