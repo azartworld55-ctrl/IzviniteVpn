@@ -142,7 +142,7 @@ async function handle(request,env) {
   }
   if(method==="POST" && path==="/api/admin/users") {
     const body=await request.json(), username=String(body.username||"").trim(), days=Number(body.days), maxDevices=Number(body.maxDevices);
-    if(!/^[\p{L}\p{N}_.-]{3,32}$/u.test(username)) return json({error:"Ник: 3–32 буквы, цифры, точка, дефис или подчёркивание"},400);
+    if(!/^[\p{L}\p{N}_.-]{3,32}$/u.test(username)) return json({error:"Некорректный ник"},400);
     if(![0,7,30,90].includes(days)||![1,2].includes(maxDevices)) return json({error:"Недопустимые параметры ключа"},400);
     const suppliedKey=String(body.key||"").trim();
     if(suppliedKey && (suppliedKey.length<12 || suppliedKey.length>128)) return json({error:"Ключ должен содержать от 12 до 128 символов"},400);
@@ -163,7 +163,7 @@ async function handle(request,env) {
     const x=await env.DB.prepare("SELECT username FROM users WHERE id=?").bind(Number(statusMatch[1])).first();
     await event(env,"user_status","Статус "+x.username+": "+status); return json({ok:true});
   }
-  const editMatch=path.match(/^\\/api\\/admin\\/users\\/(\\d+)$/);
+  const editMatch=path.match(/^\/api\/admin\/users\/(\d+)$/);
   if(method==="PATCH" && editMatch) {
     const body=await request.json(), id=Number(editMatch[1]);
     const username=String(body.username||"").trim(), days=Number(body.days), maxDevices=Number(body.maxDevices);
@@ -204,7 +204,7 @@ async function handle(request,env) {
     const x=await env.DB.prepare("SELECT username FROM users WHERE id=?").bind(Number(revokeMatch[1])).first();
     await event(env,"key_revoked","Ключ отозван: "+x.username); return json({ok:true});
   }
-  const eventMatch=path.match(/^\\/api\\/admin\\/events\\/(\\d+)$/);
+  const eventMatch=path.match(/^\/api\/admin\/events\/(\d+)$/);
   if(method==="DELETE" && eventMatch) {
     const r=await env.DB.prepare("DELETE FROM events WHERE id=?").bind(Number(eventMatch[1])).run();
     if(!r.meta.changes) return json({error:"Уведомление не найдено"},404);
