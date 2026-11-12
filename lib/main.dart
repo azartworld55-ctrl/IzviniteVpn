@@ -281,25 +281,31 @@ class _HomeState extends SessionState<HomePage> {
       if (state.error != null && mounted) setState(() => vpnError = state.error.toString());
     });
     groupsSub = SingBox.instance.watchGroups().listen((groups) {
-      for (final group in groups) {
-        if (group.tag == SingBoxConfigBuilder.proxyTag) {
-          var value = group.selected?.toString();
-          if (value == SingBoxConfigBuilder.autoTag) {
-            final autoGroup = groups.where((item) => item.tag == SingBoxConfigBuilder.autoTag).toList();
-            if (autoGroup.isNotEmpty) value = autoGroup.first.selected?.toString();
-          }
-          if (value != null && value.isNotEmpty && value != SingBoxConfigBuilder.autoTag && mounted) {
-            setState(() {
-              activeServer = value;
-              final exact = servers.where((server) => server.name == value).toList();
-              if (exact.isNotEmpty) {
-                selected = exact.first.id;
-              } else {
-                final duplicate = RegExp(r'^(.*) \\((\\d+)\\)
-      if (mounted) setState(() {
+      final proxyGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.proxyTag).toList();
+      if (proxyGroups.isEmpty) return;
+      var value = proxyGroups.first.selected?.toString();
+      if (value == SingBoxConfigBuilder.autoTag) {
+        final autoGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.autoTag).toList();
+        if (autoGroups.isNotEmpty) value = autoGroups.first.selected?.toString();
+      }
+      if (value == null || value.isEmpty || value == SingBoxConfigBuilder.autoTag || !mounted) return;
+      final server = _serverByOutboundTag[value];
+      setState(() {
+        activeServer = value;
+        if (server != null) selected = server.id;
+      });
+    });
+    statsSub = SingBox.instance.watchConnectionStats().listen((stats) {
+      if (!mounted) return;
+      setState(() {
         down = rate(stats.downloadSpeed);
         up = rate(stats.uploadSpeed);
       });
+    });
+    logSub = SingBox.instance.watchLogs().listen((entry) {
+      if (entry.level.index >= SingBoxLogLevel.warn.index && mounted) {
+        setState(() => coreDiagnostic = entry.plainMessage);
+      }
     });
     loadRole();
     loadServers();
