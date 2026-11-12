@@ -13,12 +13,18 @@ const orange = Color(0xFFFF7A1A);
 const panel = Color(0xFF1B1B1B);
 final api = Api();
 
+class ApiUnavailableException implements Exception {
+  final String message;
+  const ApiUnavailableException(this.message);
+  @override String toString() => message;
+}
+
 class Api {
   String? token;
   Uri uri(String p) => Uri.parse(apiUrl.replaceAll(RegExp(r'/$'), '') + '/api' + p);
   Map<String,String> get headers => {'Content-Type':'application/json', if(token != null) 'Authorization':'Bearer $token'};
   Future<Map<String,dynamic>> call(String method,String path,[Map<String,dynamic>? body]) async {
-    if(apiUrl.isEmpty) throw Exception('Сервер авторизации ещё не настроен');
+    if(apiUrl.isEmpty) throw const ApiUnavailableException('Сервер авторизации ещё не настроен.');
     final u=uri(path);
     late http.Response r;
     try {
@@ -32,9 +38,9 @@ class Api {
         r = await http.post(u, headers: headers, body: jsonEncode(body ?? {})).timeout(const Duration(seconds: 15));
       }
     } on TimeoutException {
-      throw Exception('Сервер авторизации недоступен: превышено время ожидания.');
+      throw const ApiUnavailableException('Сервер авторизации недоступен: превышено время ожидания.');
     } on http.ClientException {
-      throw Exception('Сервер авторизации недоступен. Проверь подключение к интернету.');
+      throw const ApiUnavailableException('Сервер авторизации недоступен. Проверь подключение к интернету.');
     }
     final d=r.body.isEmpty?<String,dynamic>{}:jsonDecode(r.body) as Map<String,dynamic>;
     if(r.statusCode<200 || r.statusCode>=300) throw Exception(d['error']??'Ошибка сервера');
@@ -174,7 +180,12 @@ abstract class SessionState<T extends StatefulWidget> extends State<T> with Widg
     try {
       await api.call('GET', '/auth/me');
       return true;
-    } catch (_) {
+    } catch (e) {
+      if (e is ApiUnavailableException) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.message)));
+        return false;
+      }
       final p = await SharedPreferences.getInstance();
       await p.remove('session_token');
       api.token = null;
@@ -232,8 +243,12 @@ class _HomeState extends SessionState<HomePage> {
     groupsSub = SingBox.instance.watchGroups().listen((groups) {
       for (final group in groups) {
         if (group.tag == SingBoxConfigBuilder.proxyTag) {
-          final value = group.selected?.toString();
-          if (value != null && value.isNotEmpty && mounted) {
+          var value = group.selected?.toString();
+          if (value == SingBoxConfigBuilder.autoTag) {
+            final autoGroup = groups.where((item) => item.tag == SingBoxConfigBuilder.autoTag).toList();
+            if (autoGroup.isNotEmpty) value = autoGroup.first.selected?.toString();
+          }
+          if (value != null && value.isNotEmpty && value != SingBoxConfigBuilder.autoTag && mounted) {
             setState(() {
               activeServer = value;
               final found = servers.where((server) => server.name == value).toList();
