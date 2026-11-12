@@ -29,6 +29,10 @@ jobs:
           cp -R lib build_src/lib
           sed -i 's/android:label="build_src"/android:label="IzviniteVpn"/' build_src/android/app/src/main/AndroidManifest.xml
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' build_src/android/app/build.gradle.kts
+          mkdir -p build_src/android/app/src/main/res/drawable build_src/android/app/src/main/res/mipmap-anydpi-v26 build_src/android/app/src/main/res/values
+          cp android-icon/ic_launcher_foreground.xml build_src/android/app/src/main/res/drawable/ic_launcher_foreground.xml
+          cp android-icon/ic_launcher.xml build_src/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          cp android-icon/colors.xml build_src/android/app/src/main/res/values/ic_launcher_colors.xml
           cd build_src
           flutter pub get
       - name: Build APK

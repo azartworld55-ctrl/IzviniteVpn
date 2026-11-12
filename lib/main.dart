@@ -185,13 +185,26 @@ class _AdminState extends State<AdminPage>{
     try{final r=await api.call('POST','/admin/users',v);if(!mounted)return;await showDialog<void>(context:context,builder:(c)=>AlertDialog(title:const Text('Ключ создан'),content:SelectableText('Ник: ${r['user']['username']}\nКлюч: ${r['key']}\nСохрани ключ сейчас.'),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Закрыть'))]));await load();}catch(e){setState(()=>error=e.toString());}
   }
   Future<void> toggle(dynamic u)async{try{await api.call('PATCH','/admin/users/${u['id']}/status',{'status':u['status']=='blocked'?'active':'blocked'});await load();}catch(e){setState(()=>error=e.toString());}}
+  Future<void> revoke(dynamic u)async{
+    final ok=await showDialog<bool>(context:context,builder:(c)=>AlertDialog(
+      title:const Text('Отозвать ключ?'),
+      content:Text('Ключ пользователя ${u['username']} перестанет работать.'),
+      actions:[TextButton(onPressed:()=>Navigator.pop(c,false),child:const Text('Отмена')),
+        FilledButton(onPressed:()=>Navigator.pop(c,true),child:const Text('Отозвать'))]));
+    if(ok!=true)return;
+    try{await api.call('POST','/admin/users/${u['id']}/revoke');await load();}
+    catch(e){if(mounted)setState(()=>error=e.toString());}
+  }
   @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:const Text('Администрирование'),actions:[IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),
     floatingActionButton:FloatingActionButton.extended(onPressed:createUser,backgroundColor:orange,foregroundColor:Colors.black,icon:const Icon(Icons.person_add),label:const Text('Создать ключ')),
     body:RefreshIndicator(onRefresh:load,color:orange,child:ListView(padding:const EdgeInsets.all(16),children:[
       Row(children:[Expanded(child:stat('Активные',stats['activeUsers']??'—')),const SizedBox(width:10),Expanded(child:stat('Выданные ключи',stats['issuedKeys']??'—'))]),
       const SizedBox(height:16),TextField(controller:search,onSubmitted:(_)=>load(),decoration:InputDecoration(labelText:'Поиск по нику или ключу',suffixIcon:IconButton(onPressed:load,icon:const Icon(Icons.search)))),
       const SizedBox(height:12),const Text('Пользователи',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
-      ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']} · ${u['expiresAt']??'Без срока'} · ${u['deviceCount']}/${u['maxDevices']} устройств'),trailing:IconButton(onPressed:()=>toggle(u),icon:Icon(u['status']=='blocked'?Icons.lock_open:Icons.block,color:orange))))),
+      ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']} · ${u['expiresAt']??'Без срока'} · ${u['deviceCount']}/${u['maxDevices']} устройств'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[
+        IconButton(onPressed:()=>toggle(u),icon:Icon(u['status']=='blocked'?Icons.lock_open:Icons.block,color:orange)),
+        IconButton(onPressed:()=>revoke(u),icon:const Icon(Icons.key_off,color:Colors.redAccent)),
+      ])))),
       const SizedBox(height:16),const Text('Уведомления',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
       ...events.map((e)=>ListTile(dense:true,leading:const Icon(Icons.notifications_none,color:orange),title:Text(e['message']),subtitle:Text(e['createdAt']))),
       if(busy)const Center(child:CircularProgressIndicator(color:orange)),if(error!=null)Text(error!,style:const TextStyle(color:Colors.redAccent)),const SizedBox(height:80),
