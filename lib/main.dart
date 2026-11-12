@@ -501,10 +501,15 @@ class _HomeState extends SessionState<HomePage> {
     setState(() { selected = server.id; if (connected) connecting = true; vpnError = null; });
     try {
       if (connected) {
-        // Select by stable profile ID: display names may be duplicated and
-        // sing_box disambiguates duplicate outbound tags internally.
-        await SingBox.instance.connectToServers(servers, selectedId: server.id);
-        await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
+        // Resolve the plugin-generated tag from the stable profile ID. This
+        // keeps switching instant and handles duplicate display names.
+        String? outboundTag;
+        for (final entry in _serverByOutboundTag.entries) {
+          if (entry.value.id == server.id) { outboundTag = entry.key; break; }
+        }
+        if (outboundTag == null) throw Exception('Не удалось найти сервер в активной конфигурации.');
+        await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag, outboundTag);
+        if (mounted) setState(() => activeServer = outboundTag);
       }
       if (mounted) Navigator.pop(context);
     } catch (e) {
