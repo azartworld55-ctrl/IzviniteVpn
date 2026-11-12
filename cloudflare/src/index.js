@@ -122,7 +122,7 @@ async function handle(request,env) {
   if(method==="GET" && path==="/api/auth/me") return json({user:userView(u)});
   if(method==="GET" && path==="/api/admin/stats") {
     const a=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND status='active' AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)").first();
-    const k=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user'").first();
+    const k=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND key_hash<>''").first();
     return json({activeUsers:a.n,issuedKeys:k.n});
   }
   if(method==="GET" && path==="/api/admin/users") {
@@ -133,7 +133,7 @@ async function handle(request,env) {
       const byKey=q.length>=8?(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND key_fingerprint=? LIMIT 20").bind(await fingerprint(q)).all()).results:[];
       rows=[...new Map([...byName,...byKey].map(x=>[x.id,x])).values()];
     }
-    return json({users:Promise.all(rows.map(async x=>({id:x.id,username:x.username,status:userStatus(x),expiresAt:x.expires_at,maxDevices:x.max_devices,deviceCount:x.device_count,key:await decryptUserKey(x.key_hash,env)})))});
+    return json({users:await Promise.all(rows.map(async x=>({id:x.id,username:x.username,status:userStatus(x),expiresAt:x.expires_at,maxDevices:x.max_devices,deviceCount:x.device_count,key:await decryptUserKey(x.key_hash,env)})))});
   }
   if(method==="POST" && path==="/api/admin/users") {
     const body=await request.json(), username=String(body.username||"").trim(), days=Number(body.days), maxDevices=Number(body.maxDevices);
@@ -157,6 +157,16 @@ async function handle(request,env) {
     if(!r.meta.changes) return json({error:"Пользователь не найден"},404);
     const x=await env.DB.prepare("SELECT username FROM users WHERE id=?").bind(Number(statusMatch[1])).first();
     await event(env,"user_status","Статус "+x.username+": "+status); return json({ok:true});
+  }
+  const keyMatch=path.match(/^\/api\/admin\/users\/(\d+)\/key$/);
+  if(method==="PATCH" && keyMatch) {
+    const body=await request.json(), next=String(body.key||"").trim();
+    if(next.length<12 || next.length>128) return json({error:"Ключ должен содержать от 12 до 128 символов"},400);
+    const id=Number(keyMatch[1]), target=await env.DB.prepare("SELECT username FROM users WHERE id=? AND role='user'").bind(id).first();
+    if(!target) return json({error:"Пользователь не найден"},404);
+    await env.DB.prepare("UPDATE users SET key_hash=?,key_fingerprint=?,status='active' WHERE id=? AND role='user'").bind(await encryptUserKey(next,env),await fingerprint(next),id).run();
+    await event(env,"key_reset","Ключ обновлён: "+target.username);
+    return json({ok:true});
   }
   const revokeMatch=path.match(/^\/api\/admin\/users\/(\d+)\/revoke$/);
   if(method==="POST" && revokeMatch) {
