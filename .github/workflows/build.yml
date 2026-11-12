@@ -39,6 +39,12 @@ jobs:
           cp android-icon/colors.xml build_src/android/app/src/main/res/values/ic_launcher_colors.xml
           cd build_src
           flutter pub get
+      - name: Validate API endpoint
+        env:
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: |
+          test -n "$API_BASE_URL" || (echo "Set repository Actions variable API_BASE_URL after deploying the auth API"; exit 1)
+          case "$API_BASE_URL" in https://*) ;; *) echo "API_BASE_URL must use HTTPS"; exit 1 ;; esac
       - name: Build APK
         env:
           API_BASE_URL: ${{ vars.API_BASE_URL }}
