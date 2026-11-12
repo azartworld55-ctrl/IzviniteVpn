@@ -282,20 +282,27 @@ class _AdminState extends SessionState<AdminPage>{
       TextField(controller:name,decoration:const InputDecoration(labelText:'Ник')),
       const SizedBox(height:10),
       TextField(controller:keyInput,decoration:const InputDecoration(labelText:'Ключ вручную (необязательно)',helperText:'Оставь пустым для автогенерации')),
-      DropdownButtonFormField<int>(value:days,decoration:const InputDecoration(labelText:'Срок'),items:const [DropdownMenuItem(value:7,child:Text('7 дней')),DropdownMenuItem(value:30,child:Text('30 дней')),DropdownMenuItem(value:90,child:Text('90 дней')),DropdownMenuItem(value:0,child:Text('Без ограничения'))],onChanged:(x)=>refresh(()=>days=x??30)),
+      DropdownButtonFormField<int>(value:days,decoration:const InputDecoration(labelText:'Срок доступа'),items:const [DropdownMenuItem(value:1,child:Text('1 день')),DropdownMenuItem(value:2,child:Text('2 дня')),DropdownMenuItem(value:7,child:Text('7 дней')),DropdownMenuItem(value:30,child:Text('30 дней')),DropdownMenuItem(value:90,child:Text('90 дней')),DropdownMenuItem(value:0,child:Text('Без ограничения'))],onChanged:(x)=>refresh(()=>days=x??30)),
       DropdownButtonFormField<int>(value:devices,decoration:const InputDecoration(labelText:'Устройства'),items:const [DropdownMenuItem(value:1,child:Text('Одно')),DropdownMenuItem(value:2,child:Text('Два'))],onChanged:(x)=>refresh(()=>devices=x??1)),
     ]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,{'username':name.text.trim(),'key':keyInput.text.trim(),'days':days,'maxDevices':devices}),child:const Text('Создать'))])));
     if(v==null||(v['username'] as String).isEmpty)return;
     try{final r=await api.call('POST','/admin/users',v);if(!mounted)return;await showDialog<void>(context:context,builder:(c)=>AlertDialog(title:const Text('Ключ создан'),content:SelectableText('Ник: ${r['user']['username']}\nКлюч: ${r['key']}\nСохрани ключ сейчас.'),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Закрыть'))]));await load();}catch(e){setState(()=>error=e.toString());}
   }
   Future<void> setKey(dynamic u)async{
-    final controller=TextEditingController();
-    final value=await showDialog<String>(context:context,builder:(c)=>AlertDialog(
-      title:Text('Задать ключ: ${u['username']}'),
-      content:TextField(controller:controller,autofocus:true,decoration:const InputDecoration(labelText:'Новый ключ (12–128 символов)')),
-      actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,controller.text.trim()),child:const Text('Сохранить'))]));
-    if(value==null)return;
-    try{await api.call('PATCH','/admin/users/${u['id']}/key',{'key':value});await load();}
+    final controller=TextEditingController();int days=30;
+    final value=await showDialog<Map<String,dynamic>>(context:context,builder:(c)=>StatefulBuilder(builder:(c,refresh)=>AlertDialog(
+      title:Text('Новый ключ: ${u['username']}'),
+      content:Column(mainAxisSize:MainAxisSize.min,children:[
+        TextField(controller:controller,autofocus:true,decoration:const InputDecoration(labelText:'Ключ (12–128 символов)')),
+        DropdownButtonFormField<int>(value:days,decoration:const InputDecoration(labelText:'Срок доступа'),items:const [
+          DropdownMenuItem(value:1,child:Text('1 день')),DropdownMenuItem(value:2,child:Text('2 дня')),
+          DropdownMenuItem(value:7,child:Text('7 дней')),DropdownMenuItem(value:30,child:Text('30 дней')),
+          DropdownMenuItem(value:90,child:Text('90 дней')),DropdownMenuItem(value:0,child:Text('Без ограничения'))],
+          onChanged:(x)=>refresh(()=>days=x??30)),
+      ]),
+      actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,{'key':controller.text.trim(),'days':days}),child:const Text('Сохранить'))])));
+    if(value==null){controller.dispose();return;}
+    try{await api.call('PATCH','/admin/users/${u['id']}/key',value);await load();}
     catch(e){if(mounted)setState(()=>error=e.toString());}
     finally{controller.dispose();}
   }
@@ -310,19 +317,28 @@ class _AdminState extends SessionState<AdminPage>{
     try{await api.call('POST','/admin/users/${u['id']}/revoke');await load();}
     catch(e){if(mounted)setState(()=>error=e.toString());}
   }
+  Future<bool> confirmAction(String title,String message,String action)async=>await showDialog<bool>(context:context,builder:(c)=>AlertDialog(title:Text(title),content:Text(message),actions:[TextButton(onPressed:()=>Navigator.pop(c,false),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,true),child:Text(action))]))??false;
+  Future<void> deleteEvent(dynamic e)async{
+    if(!await confirmAction('Удалить уведомление?','Событие будет удалено из журнала.','Удалить'))return;
+    try{await api.call('DELETE','/admin/events/${e['id']}');await load();}catch(err){if(mounted)setState(()=>error=err.toString());}
+  }
+  Future<void> clearEvents()async{
+    if(events.isEmpty||!await confirmAction('Очистить все уведомления?','История событий будет удалена без возможности восстановления.','Очистить'))return;
+    try{await api.call('DELETE','/admin/events');await load();}catch(err){if(mounted)setState(()=>error=err.toString());}
+  }
   @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:const Text('Администрирование'),actions:[IconButton(tooltip:'Открыть VPN',onPressed:()=>Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const HomePage())),icon:const Icon(Icons.vpn_key,color:orange)),IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),
     floatingActionButton:FloatingActionButton.extended(onPressed:createUser,backgroundColor:orange,foregroundColor:Colors.black,icon:const Icon(Icons.person_add),label:const Text('Создать ключ')),
     body:RefreshIndicator(onRefresh:load,color:orange,child:ListView(padding:const EdgeInsets.all(16),children:[
       Row(children:[Expanded(child:stat('Активные',stats['activeUsers']??'—')),const SizedBox(width:10),Expanded(child:stat('Выданные ключи',stats['issuedKeys']??'—'))]),
       const SizedBox(height:16),TextField(controller:search,onSubmitted:(_)=>load(),decoration:InputDecoration(labelText:'Поиск по нику или ключу',suffixIcon:IconButton(onPressed:load,icon:const Icon(Icons.search)))),
       const SizedBox(height:12),const Text('Пользователи',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
-      ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']} · ${u['expiresAt']??'Без срока'} · ${u['deviceCount']}/${u['maxDevices']} устройств\\nКлюч: ${u['key']??'недоступен (старый формат или отозван)'}'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[
+      ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']=='blocked'?'Заблокирован':'Активен'} · Создан: ${u['createdAt']??'—'}\\nСрок: ${u['expiresAt']??'Без ограничения'} · ${u['deviceCount']}/${u['maxDevices']} устройств\\nКлюч: ${u['key']??'недоступен (старый формат)'}'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[
         if(u['key']!=null) IconButton(tooltip:'Скопировать ключ',onPressed:()=>Clipboard.setData(ClipboardData(text:u['key'])),icon:const Icon(Icons.copy,color:orange)) else IconButton(tooltip:'Задать новый ключ',onPressed:()=>setKey(u),icon:const Icon(Icons.edit,color:orange)),
         IconButton(onPressed:()=>toggle(u),icon:Icon(u['status']=='blocked'?Icons.lock_open:Icons.block,color:orange)),
         IconButton(onPressed:()=>revoke(u),icon:const Icon(Icons.key_off,color:Colors.redAccent)),
       ])))),
-      const SizedBox(height:16),const Text('Уведомления',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
-      ...events.map((e)=>ListTile(dense:true,leading:const Icon(Icons.notifications_none,color:orange),title:Text(e['message']),subtitle:Text(e['createdAt']))),
+      const SizedBox(height:16),Row(children:[const Expanded(child:Text('Уведомления',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18))),TextButton.icon(onPressed:events.isEmpty?null:clearEvents,icon:const Icon(Icons.delete_sweep),label:const Text('Очистить всё'))]),
+      ...events.map((e)=>ListTile(dense:true,leading:const Icon(Icons.notifications_none,color:orange),title:Text(e['message']),subtitle:Text(e['createdAt']),trailing:IconButton(tooltip:'Удалить уведомление',onPressed:()=>deleteEvent(e),icon:const Icon(Icons.delete_outline,color:Colors.redAccent)))),
       if(busy)const Center(child:CircularProgressIndicator(color:orange)),if(error!=null)Text(error!,style:const TextStyle(color:Colors.redAccent)),const SizedBox(height:80),
     ])));
   Widget stat(String t,dynamic v)=>Container(padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(18)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('$v',style:const TextStyle(color:orange,fontSize:25,fontWeight:FontWeight.bold)),Text(t)]));
