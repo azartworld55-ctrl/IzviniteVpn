@@ -407,12 +407,15 @@ class _HomeState extends SessionState<HomePage> {
         await SingBox.instance.connectToServers(servers, selectedId: selected);
         await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
       }
-      final testedAt = DateTime.now().subtract(const Duration(seconds: 1));
-      final group = await SingBox.instance.testGroup(
-        SingBoxConfigBuilder.autoTag,
-        timeout: const Duration(seconds: 90),
-      );
-      if (group != null) {
+      final initialGroups = await SingBox.instance.watchGroups().first.timeout(const Duration(seconds: 8));
+      final hasAutoGroup = initialGroups.any((item) => item.tag == SingBoxConfigBuilder.autoTag && item.type == 'urltest');
+      if (hasAutoGroup) {
+        final testedAt = DateTime.now().subtract(const Duration(seconds: 1));
+        final group = await SingBox.instance.testGroup(
+          SingBoxConfigBuilder.autoTag,
+          timeout: const Duration(seconds: 90),
+        );
+        if (group == null) throw Exception('Не удалось получить результаты проверки серверов.');
         final byTag = _serverByOutboundTag;
         for (final item in group.items) {
           final server = byTag[item.tag];
@@ -421,7 +424,7 @@ class _HomeState extends SessionState<HomePage> {
           }
         }
       } else {
-        // Single-server configurations have no auto URL-test group.
+        // A single-server configuration has no auto URL-test group.
         final tag = await SingBox.instance.currentOutboundTag();
         if (tag == null) throw Exception('Не удалось определить активный прокси-сервер.');
         final result = await SingBox.instance.pingOutbound(tag, timeout: const Duration(seconds: 20));
