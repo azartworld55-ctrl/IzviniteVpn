@@ -186,7 +186,7 @@ async function handle(request,env) {
     await env.DB.prepare("DELETE FROM events").run();
     return json({ok:true});
   }
-  const eventMatch=path.match(/^\\/api\\/admin\\/events\\/(\\d+)$/);
+  const eventMatch=path.match(/^\/api\/admin\/events\/(\d+)$/);
   if(method==="DELETE" && eventMatch) {
     const r=await env.DB.prepare("DELETE FROM events WHERE id=?").bind(Number(eventMatch[1])).run();
     if(!r.meta.changes) return json({error:"Уведомление не найдено"},404);
@@ -201,7 +201,7 @@ export default {
       const response=await handle(request,env);
       const headers=new Headers(response.headers);
       headers.set("access-control-allow-origin","*");
-      headers.set("access-control-allow-methods","GET,POST,PATCH,OPTIONS");
+      headers.set("access-control-allow-methods","GET,POST,PATCH,DELETE,OPTIONS");
       headers.set("access-control-allow-headers","authorization,content-type");
       return new Response(response.body,{status:response.status,headers});
     } catch(error) {
