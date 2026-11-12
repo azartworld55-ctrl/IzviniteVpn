@@ -20,9 +20,22 @@ class Api {
   Future<Map<String,dynamic>> call(String method,String path,[Map<String,dynamic>? body]) async {
     if(apiUrl.isEmpty) throw Exception('Сервер авторизации ещё не настроен');
     final u=uri(path);
-    final r=method=='GET' ? await http.get(u,headers:headers) : method=='PATCH'
-      ? await http.patch(u,headers:headers,body:jsonEncode(body??{}))
-      : await http.post(u,headers:headers,body:jsonEncode(body??{}));
+    late http.Response r;
+    try {
+      if (method == 'GET') {
+        r = await http.get(u, headers: headers).timeout(const Duration(seconds: 15));
+      } else if (method == 'PATCH') {
+        r = await http.patch(u, headers: headers, body: jsonEncode(body ?? {})).timeout(const Duration(seconds: 15));
+      } else if (method == 'DELETE') {
+        r = await http.delete(u, headers: headers).timeout(const Duration(seconds: 15));
+      } else {
+        r = await http.post(u, headers: headers, body: jsonEncode(body ?? {})).timeout(const Duration(seconds: 15));
+      }
+    } on TimeoutException {
+      throw Exception('Сервер авторизации недоступен: превышено время ожидания.');
+    } on http.ClientException {
+      throw Exception('Сервер авторизации недоступен. Проверь подключение к интернету.');
+    }
     final d=r.body.isEmpty?<String,dynamic>{}:jsonDecode(r.body) as Map<String,dynamic>;
     if(r.statusCode<200 || r.statusCode>=300) throw Exception(d['error']??'Ошибка сервера');
     return d;
@@ -593,60 +606,288 @@ class _HomeState extends SessionState<HomePage> {
   }
 }
 
-class AdminPage extends StatefulWidget{const AdminPage({super.key});@override State<AdminPage> createState()=>_AdminState();}
-class _AdminState extends SessionState<AdminPage>{
-  final search=TextEditingController();Map<String,dynamic> stats={};List<dynamic> users=[],events=[];bool busy=false;String? error;
-  @override void initState(){super.initState();startSessionWatch();load();}
-  @override void dispose(){search.dispose();super.dispose();}
-  Future<void> load()async{setState(()=>busy=true);try{final a=await Future.wait([api.call('GET','/admin/stats'),api.call('GET','/admin/users'+(search.text.isEmpty?'':'?q=${Uri.encodeQueryComponent(search.text)}')),api.call('GET','/admin/events')]);if(mounted)setState(() { stats=a[0]; users=a[1]['users']; events=a[2]['events']; });}catch(e){error=e.toString();}finally{if(mounted)setState(()=>busy=false);}}
-  Future<void> createUser()async{
-    final name=TextEditingController(),keyInput=TextEditingController();int days=30,devices=1;
-    final v=await showDialog<Map<String,dynamic>>(context:context,builder:(c)=>StatefulBuilder(builder:(c,refresh)=>AlertDialog(title:const Text('Новый пользователь'),content:Column(mainAxisSize:MainAxisSize.min,children:[
-      TextField(controller:name,decoration:const InputDecoration(labelText:'Ник')),
-      const SizedBox(height:10),
-      TextField(controller:keyInput,decoration:const InputDecoration(labelText:'Ключ вручную (необязательно)',helperText:'Оставь пустым для автогенерации')),
-      DropdownButtonFormField<int>(value:days,decoration:const InputDecoration(labelText:'Срок'),items:const [DropdownMenuItem(value:7,child:Text('7 дней')),DropdownMenuItem(value:30,child:Text('30 дней')),DropdownMenuItem(value:90,child:Text('90 дней')),DropdownMenuItem(value:0,child:Text('Без ограничения'))],onChanged:(x)=>refresh(()=>days=x??30)),
-      DropdownButtonFormField<int>(value:devices,decoration:const InputDecoration(labelText:'Устройства'),items:const [DropdownMenuItem(value:1,child:Text('Одно')),DropdownMenuItem(value:2,child:Text('Два'))],onChanged:(x)=>refresh(()=>devices=x??1)),
-    ]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,{'username':name.text.trim(),'key':keyInput.text.trim(),'days':days,'maxDevices':devices}),child:const Text('Создать'))])));
-    if(v==null||(v['username'] as String).isEmpty)return;
-    try{final r=await api.call('POST','/admin/users',v);if(!mounted)return;await showDialog<void>(context:context,builder:(c)=>AlertDialog(title:const Text('Ключ создан'),content:SelectableText('Ник: ${r['user']['username']}\nКлюч: ${r['key']}\nСохрани ключ сейчас.'),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Закрыть'))]));await load();}catch(e){setState(()=>error=e.toString());}
-  }
-  Future<void> setKey(dynamic u)async{
-    final controller=TextEditingController();
-    final value=await showDialog<String>(context:context,builder:(c)=>AlertDialog(
-      title:Text('Задать ключ: ${u['username']}'),
-      content:TextField(controller:controller,autofocus:true,decoration:const InputDecoration(labelText:'Новый ключ (12–128 символов)')),
-      actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,controller.text.trim()),child:const Text('Сохранить'))]));
-    if(value==null)return;
-    try{await api.call('PATCH','/admin/users/${u['id']}/key',{'key':value});await load();}
-    catch(e){if(mounted)setState(()=>error=e.toString());}
-    finally{controller.dispose();}
-  }
-  Future<void> toggle(dynamic u)async{try{await api.call('PATCH','/admin/users/${u['id']}/status',{'status':u['status']=='blocked'?'active':'blocked'});await load();}catch(e){setState(()=>error=e.toString());}}
-  Future<void> revoke(dynamic u)async{
-    final ok=await showDialog<bool>(context:context,builder:(c)=>AlertDialog(
-      title:const Text('Отозвать ключ?'),
-      content:Text('Ключ пользователя ${u['username']} перестанет работать.'),
-      actions:[TextButton(onPressed:()=>Navigator.pop(c,false),child:const Text('Отмена')),
-        FilledButton(onPressed:()=>Navigator.pop(c,true),child:const Text('Отозвать'))]));
-    if(ok!=true)return;
-    try{await api.call('POST','/admin/users/${u['id']}/revoke');await load();}
-    catch(e){if(mounted)setState(()=>error=e.toString());}
-  }
-  @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:const Text('Администрирование'),actions:[IconButton(tooltip:'Открыть VPN',onPressed:()=>Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const HomePage())),icon:const Icon(Icons.vpn_key,color:orange)),IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),
-    floatingActionButton:FloatingActionButton.extended(onPressed:createUser,backgroundColor:orange,foregroundColor:Colors.black,icon:const Icon(Icons.person_add),label:const Text('Создать ключ')),
-    body:RefreshIndicator(onRefresh:load,color:orange,child:ListView(padding:const EdgeInsets.all(16),children:[
-      Row(children:[Expanded(child:stat('Активные',stats['activeUsers']??'—')),const SizedBox(width:10),Expanded(child:stat('Выданные ключи',stats['issuedKeys']??'—'))]),
-      const SizedBox(height:16),TextField(controller:search,onSubmitted:(_)=>load(),decoration:InputDecoration(labelText:'Поиск по нику или ключу',suffixIcon:IconButton(onPressed:load,icon:const Icon(Icons.search)))),
-      const SizedBox(height:12),const Text('Пользователи',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
-      ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']} · ${u['expiresAt']??'Без срока'} · ${u['deviceCount']}/${u['maxDevices']} устройств\\nКлюч: ${u['key']??'недоступен (старый формат или отозван)'}'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[
-        if(u['key']!=null) IconButton(tooltip:'Скопировать ключ',onPressed:()=>Clipboard.setData(ClipboardData(text:u['key'])),icon:const Icon(Icons.copy,color:orange)) else IconButton(tooltip:'Задать новый ключ',onPressed:()=>setKey(u),icon:const Icon(Icons.edit,color:orange)),
-        IconButton(onPressed:()=>toggle(u),icon:Icon(u['status']=='blocked'?Icons.lock_open:Icons.block,color:orange)),
-        IconButton(onPressed:()=>revoke(u),icon:const Icon(Icons.key_off,color:Colors.redAccent)),
-      ])))),
-      const SizedBox(height:16),const Text('Уведомления',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
-      ...events.map((e)=>ListTile(dense:true,leading:const Icon(Icons.notifications_none,color:orange),title:Text(e['message']),subtitle:Text(e['createdAt']))),
-      if(busy)const Center(child:CircularProgressIndicator(color:orange)),if(error!=null)Text(error!,style:const TextStyle(color:Colors.redAccent)),const SizedBox(height:80),
-    ])));
-  Widget stat(String t,dynamic v)=>Container(padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(18)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('$v',style:const TextStyle(color:orange,fontSize:25,fontWeight:FontWeight.bold)),Text(t)]));
+class AdminPage extends StatefulWidget {
+  const AdminPage({super.key});
+  @override State<AdminPage> createState() => _AdminState();
 }
+
+class _AdminState extends SessionState<AdminPage> {
+  final search = TextEditingController();
+  Timer? searchTimer;
+  Map<String, dynamic> stats = {};
+  List<dynamic> users = [], revokedUsers = [], events = [];
+  bool busy = false;
+  String? error;
+
+  @override void initState() { super.initState(); startSessionWatch(); load(); }
+  @override void dispose() { searchTimer?.cancel(); search.dispose(); super.dispose(); }
+
+  Future<void> load() async {
+    if (mounted) setState(() => busy = true);
+    try {
+      final results = await Future.wait([
+        api.call('GET', '/admin/stats'),
+        api.call('GET', '/admin/users' + (search.text.trim().isEmpty ? '' : '?q=' + Uri.encodeQueryComponent(search.text.trim()))),
+        api.call('GET', '/admin/events'),
+      ]);
+      if (mounted) setState(() {
+        stats = results[0];
+        users = results[1]['users'] ?? [];
+        revokedUsers = results[1]['revokedUsers'] ?? [];
+        events = results[2]['events'] ?? [];
+        error = null;
+      });
+    } catch (e) {
+      if (mounted) setState(() => error = e.toString());
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  void searchChanged(String value) {
+    searchTimer?.cancel();
+    searchTimer = Timer(const Duration(milliseconds: 280), load);
+  }
+
+  Future<void> createUser() async {
+    final name = TextEditingController(), keyInput = TextEditingController();
+    int days = 30, devices = 1;
+    final value = await showDialog<Map<String, dynamic>>(context: context,
+      builder: (c) => StatefulBuilder(builder: (c, refresh) => AlertDialog(
+        title: const Text('Новый пользователь'),
+        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: name, decoration: const InputDecoration(labelText: 'Ник')),
+          const SizedBox(height: 10),
+          TextField(controller: keyInput, decoration: const InputDecoration(labelText: 'Ключ вручную (необязательно)')),
+          DropdownButtonFormField<int>(
+            value: days, decoration: const InputDecoration(labelText: 'Срок доступа'),
+            items: const [
+              DropdownMenuItem(value: 7, child: Text('7 дней')),
+              DropdownMenuItem(value: 30, child: Text('30 дней')),
+              DropdownMenuItem(value: 90, child: Text('90 дней')),
+              DropdownMenuItem(value: 0, child: Text('Без ограничения')),
+            ],
+            onChanged: (v) => refresh(() => days = v ?? 30),
+          ),
+          DropdownButtonFormField<int>(
+            value: devices, decoration: const InputDecoration(labelText: 'Устройства'),
+            items: const [DropdownMenuItem(value: 1, child: Text('1 устройство')), DropdownMenuItem(value: 2, child: Text('2 устройства'))],
+            onChanged: (v) => refresh(() => devices = v ?? 1),
+          ),
+        ])),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(c, {
+            'username': name.text.trim(), 'key': keyInput.text.trim(), 'days': days, 'maxDevices': devices,
+          }), child: const Text('Создать')),
+        ],
+      )));
+    if (value == null || (value['username'] as String).isEmpty) {
+      name.dispose(); keyInput.dispose(); return;
+    }
+    try {
+      final result = await api.call('POST', '/admin/users', value);
+      if (!mounted) return;
+      await showDialog<void>(context: context, builder: (c) => AlertDialog(
+        title: const Text('Ключ создан'),
+        content: SelectableText('Ник: ' + result['user']['username'] + '\nКлюч: ' + result['key'] + '\n\nСохрани ключ сейчас.'),
+        actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Закрыть'))],
+      ));
+      await load();
+    } catch (e) { if (mounted) setState(() => error = e.toString()); }
+    finally { name.dispose(); keyInput.dispose(); }
+  }
+
+  Future<bool> confirm(String title, String message, String action) async {
+    return await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+      title: Text(title), content: Text(message),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Отмена')),
+        FilledButton(onPressed: () => Navigator.pop(c, true), child: Text(action)),
+      ],
+    )) ?? false;
+  }
+
+  Future<void> editUser(dynamic user) async {
+    final name = TextEditingController(text: user['username'] ?? '');
+    int days = 30, devices = (user['maxDevices'] ?? 1) as int;
+    final expiry = user['expiresAt']?.toString();
+    if (expiry == null) {
+      days = 0;
+    } else {
+      final remaining = DateTime.tryParse(expiry)?.difference(DateTime.now()).inDays ?? 30;
+      days = remaining > 70 ? 90 : remaining > 20 ? 30 : 7;
+    }
+    final value = await showDialog<Map<String, dynamic>>(context: context,
+      builder: (c) => StatefulBuilder(builder: (c, refresh) => AlertDialog(
+        title: Text('Изменить ' + (user['username'] ?? '')),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(controller: name, decoration: const InputDecoration(labelText: 'Ник')),
+          DropdownButtonFormField<int>(
+            value: days, decoration: const InputDecoration(labelText: 'Срок с сегодняшнего дня'),
+            items: const [
+              DropdownMenuItem(value: 7, child: Text('7 дней')),
+              DropdownMenuItem(value: 30, child: Text('30 дней')),
+              DropdownMenuItem(value: 90, child: Text('90 дней')),
+              DropdownMenuItem(value: 0, child: Text('Без ограничения')),
+            ],
+            onChanged: (v) => refresh(() => days = v ?? 30),
+          ),
+          DropdownButtonFormField<int>(
+            value: devices, decoration: const InputDecoration(labelText: 'Лимит устройств'),
+            items: const [DropdownMenuItem(value: 1, child: Text('1')), DropdownMenuItem(value: 2, child: Text('2'))],
+            onChanged: (v) => refresh(() => devices = v ?? 1),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(c, {
+            'username': name.text.trim(), 'days': days, 'maxDevices': devices,
+          }), child: const Text('Сохранить')),
+        ],
+      )));
+    if (value == null) { name.dispose(); return; }
+    try { await api.call('PATCH', '/admin/users/' + user['id'].toString(), value); await load(); }
+    catch (e) { if (mounted) setState(() => error = e.toString()); }
+    finally { name.dispose(); }
+  }
+
+  Future<void> setKey(dynamic user) async {
+    final controller = TextEditingController();
+    final value = await showDialog<String>(context: context, builder: (c) => AlertDialog(
+      title: Text('Новый ключ: ' + user['username']),
+      content: TextField(controller: controller, autofocus: true,
+        decoration: const InputDecoration(labelText: '12–128 символов')),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c), child: const Text('Отмена')),
+        FilledButton(onPressed: () => Navigator.pop(c, controller.text.trim()), child: const Text('Сохранить')),
+      ],
+    ));
+    if (value == null) { controller.dispose(); return; }
+    try { await api.call('PATCH', '/admin/users/' + user['id'].toString() + '/key', {'key': value}); await load(); }
+    catch (e) { if (mounted) setState(() => error = e.toString()); }
+    finally { controller.dispose(); }
+  }
+
+  Future<void> toggleUser(dynamic user) async {
+    final blocked = user['status'] == 'blocked';
+    if (!blocked && !await confirm('Заблокировать?', 'Доступ пользователя ' + user['username'] + ' будет временно закрыт.', 'Заблокировать')) return;
+    try {
+      await api.call('PATCH', '/admin/users/' + user['id'].toString() + '/status',
+        {'status': blocked ? 'active' : 'blocked'});
+      await load();
+    } catch (e) { if (mounted) setState(() => error = e.toString()); }
+  }
+
+  Future<void> revokeUser(dynamic user) async {
+    if (!await confirm('Отозвать ключ?', 'Ключ пользователя ' + user['username'] + ' перестанет работать. Запись останется в разделе отозванных.', 'Отозвать')) return;
+    try { await api.call('POST', '/admin/users/' + user['id'].toString() + '/revoke'); await load(); }
+    catch (e) { if (mounted) setState(() => error = e.toString()); }
+  }
+
+  Future<void> deleteRevoked(dynamic user) async {
+    if (!await confirm('Удалить запись навсегда?', 'Запись пользователя ' + user['username'] + ' будет удалена. Событие отзыва останется в уведомлениях.', 'Удалить')) return;
+    try { await api.call('DELETE', '/admin/users/' + user['id'].toString()); await load(); }
+    catch (e) { if (mounted) setState(() => error = e.toString()); }
+  }
+
+  Future<void> deleteEvent(dynamic event) async {
+    try { await api.call('DELETE', '/admin/events/' + event['id'].toString()); await load(); }
+    catch (e) { if (mounted) setState(() => error = e.toString()); }
+  }
+
+  Future<void> clearEvents() async {
+    if (events.isEmpty || !await confirm('Очистить уведомления?', 'Удалятся все события, включая историю отзыва ключей.', 'Очистить всё')) return;
+    try { await api.call('DELETE', '/admin/events'); await load(); }
+    catch (e) { if (mounted) setState(() => error = e.toString()); }
+  }
+
+  @override Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Администрирование'), actions: [
+      IconButton(tooltip: 'Открыть VPN', onPressed: () => Navigator.pushReplacement(
+        context, MaterialPageRoute(builder: (_) => const HomePage())), icon: const Icon(Icons.vpn_key, color: orange)),
+      IconButton(tooltip: 'Обновить', onPressed: load, icon: const Icon(Icons.refresh)),
+    ]),
+    floatingActionButton: FloatingActionButton.extended(
+      onPressed: createUser, backgroundColor: orange, foregroundColor: Colors.black,
+      icon: const Icon(Icons.person_add), label: const Text('Создать ключ')),
+    body: RefreshIndicator(color: orange, onRefresh: load, child: ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 96), children: [
+        Row(children: [
+          Expanded(child: _stat('Активные', stats['activeUsers'] ?? '—')),
+          const SizedBox(width: 8),
+          Expanded(child: _stat('Заблокированы', stats['blockedUsers'] ?? '—')),
+          const SizedBox(width: 8),
+          Expanded(child: _stat('Ключи', stats['issuedKeys'] ?? '—')),
+        ]),
+        const SizedBox(height: 16),
+        TextField(controller: search, onChanged: searchChanged, decoration: InputDecoration(
+          labelText: 'Поиск по нику или ключу', prefixIcon: const Icon(Icons.search),
+          suffixIcon: IconButton(onPressed: () { search.clear(); load(); }, icon: const Icon(Icons.close)),
+        )),
+        const SizedBox(height: 16),
+        const Text('Пользователи', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        if (users.isEmpty) const Padding(padding: EdgeInsets.all(12),
+          child: Text('Нет действующих пользователей', style: TextStyle(color: Colors.white54))),
+        ...users.map((user) => Card(color: panel, margin: const EdgeInsets.only(top: 8),
+          child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Column(children: [
+            ListTile(
+              title: Text(user['username'] ?? ''),
+              subtitle: Text((user['status'] ?? '') + ' · выдан: ' + (user['createdAt'] ?? '—') + '\n' +
+                (user['expiresAt'] ?? 'Без срока') + ' · ' + user['deviceCount'].toString() + '/' +
+                user['maxDevices'].toString() + ' устройств'),
+              isThreeLine: true,
+            ),
+            if (user['key'] != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: SelectableText('Ключ: ' + user['key'])),
+            Wrap(alignment: WrapAlignment.end, children: [
+              IconButton(tooltip: 'Копировать ключ', onPressed: user['key'] == null ? null :
+                () => Clipboard.setData(ClipboardData(text: user['key'])), icon: const Icon(Icons.copy, color: orange)),
+              IconButton(tooltip: 'Изменить данные', onPressed: () => editUser(user), icon: const Icon(Icons.edit, color: orange)),
+              IconButton(tooltip: 'Новый ключ', onPressed: () => setKey(user), icon: const Icon(Icons.key, color: orange)),
+              IconButton(tooltip: user['status'] == 'blocked' ? 'Разблокировать' : 'Заблокировать',
+                onPressed: () => toggleUser(user),
+                icon: Icon(user['status'] == 'blocked' ? Icons.lock_open : Icons.block, color: orange)),
+              IconButton(tooltip: 'Отозвать ключ', onPressed: () => revokeUser(user),
+                icon: const Icon(Icons.key_off, color: Colors.redAccent)),
+            ]),
+          ])))),
+        const SizedBox(height: 18),
+        const Text('Отозванные ключи', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        ...revokedUsers.map((user) => Card(color: panel, child: ListTile(
+          title: Text(user['username'] ?? ''),
+          subtitle: Text('Ключ отозван · запись создана ' + (user['createdAt'] ?? '—')),
+          trailing: IconButton(tooltip: 'Удалить запись', onPressed: () => deleteRevoked(user),
+            icon: const Icon(Icons.delete_forever_outlined, color: Colors.redAccent)),
+        ))),
+        const SizedBox(height: 18),
+        Row(children: [
+          const Expanded(child: Text('Уведомления', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+          TextButton.icon(onPressed: clearEvents, icon: const Icon(Icons.delete_sweep), label: const Text('Очистить')),
+        ]),
+        ...events.map((event) => ListTile(
+          dense: true, contentPadding: EdgeInsets.zero,
+          leading: const Icon(Icons.notifications_none, color: orange),
+          title: Text(event['message'] ?? ''),
+          subtitle: Text(event['createdAt'] ?? ''),
+          trailing: IconButton(tooltip: 'Удалить уведомление', onPressed: () => deleteEvent(event),
+            icon: const Icon(Icons.close, color: Colors.white54)),
+        )),
+        if (busy) const Center(child: Padding(padding: EdgeInsets.all(12),
+          child: CircularProgressIndicator(color: orange))),
+        if (error != null) Padding(padding: const EdgeInsets.only(top: 10),
+          child: Text(error!, style: const TextStyle(color: Colors.redAccent))),
+      ],
+    )),
+  );
+
+  Widget _stat(String title, dynamic value) => AnimatedContainer(
+    duration: const Duration(milliseconds: 260), padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(color: panel, borderRadius: BorderRadius.circular(16)),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(value.toString(), style: const TextStyle(color: orange, fontSize: 23, fontWeight: FontWeight.w800)),
+      Text(title, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+    ]),
+  );
+}
+
