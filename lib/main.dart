@@ -262,6 +262,17 @@ class _AdminState extends SessionState<AdminPage>{
     if(v==null||(v['username'] as String).isEmpty)return;
     try{final r=await api.call('POST','/admin/users',v);if(!mounted)return;await showDialog<void>(context:context,builder:(c)=>AlertDialog(title:const Text('Ключ создан'),content:SelectableText('Ник: ${r['user']['username']}\nКлюч: ${r['key']}\nСохрани ключ сейчас.'),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Закрыть'))]));await load();}catch(e){setState(()=>error=e.toString());}
   }
+  Future<void> setKey(dynamic u)async{
+    final controller=TextEditingController();
+    final value=await showDialog<String>(context:context,builder:(c)=>AlertDialog(
+      title:Text('Задать ключ: ${u['username']}'),
+      content:TextField(controller:controller,autofocus:true,decoration:const InputDecoration(labelText:'Новый ключ (12–128 символов)')),
+      actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,controller.text.trim()),child:const Text('Сохранить'))]));
+    if(value==null)return;
+    try{await api.call('PATCH','/admin/users/${u['id']}/key',{'key':value});await load();}
+    catch(e){if(mounted)setState(()=>error=e.toString());}
+    finally{controller.dispose();}
+  }
   Future<void> toggle(dynamic u)async{try{await api.call('PATCH','/admin/users/${u['id']}/status',{'status':u['status']=='blocked'?'active':'blocked'});await load();}catch(e){setState(()=>error=e.toString());}}
   Future<void> revoke(dynamic u)async{
     final ok=await showDialog<bool>(context:context,builder:(c)=>AlertDialog(
@@ -280,7 +291,7 @@ class _AdminState extends SessionState<AdminPage>{
       const SizedBox(height:16),TextField(controller:search,onSubmitted:(_)=>load(),decoration:InputDecoration(labelText:'Поиск по нику или ключу',suffixIcon:IconButton(onPressed:load,icon:const Icon(Icons.search)))),
       const SizedBox(height:12),const Text('Пользователи',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
       ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']} · ${u['expiresAt']??'Без срока'} · ${u['deviceCount']}/${u['maxDevices']} устройств\\nКлюч: ${u['key']??'недоступен (старый формат или отозван)'}'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[
-        if(u['key']!=null) IconButton(tooltip:'Скопировать ключ',onPressed:()=>Clipboard.setData(ClipboardData(text:u['key'])),icon:const Icon(Icons.copy,color:orange)),
+        if(u['key']!=null) IconButton(tooltip:'Скопировать ключ',onPressed:()=>Clipboard.setData(ClipboardData(text:u['key'])),icon:const Icon(Icons.copy,color:orange)) else IconButton(tooltip:'Задать новый ключ',onPressed:()=>setKey(u),icon:const Icon(Icons.edit,color:orange)),
         IconButton(onPressed:()=>toggle(u),icon:Icon(u['status']=='blocked'?Icons.lock_open:Icons.block,color:orange)),
         IconButton(onPressed:()=>revoke(u),icon:const Icon(Icons.key_off,color:Colors.redAccent)),
       ])))),
