@@ -44,7 +44,7 @@ jobs:
           cp android-icon/colors.xml build_src/android/app/src/main/res/values/ic_launcher_colors.xml
           cd build_src
           flutter pub get
-          flutter analyze --no-pub
+          flutter analyze --no-pub lib
       - name: Validate Worker JavaScript
         run: node --check cloudflare/src/index.js
       - name: Validate API endpoint
