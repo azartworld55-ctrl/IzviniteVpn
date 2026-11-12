@@ -109,7 +109,7 @@ async function handle(request,env) {
   if(method==="POST" && path==="/api/auth/change-password") {
     let u; try {u=await currentUser(request,env,false,true);} catch(e) {if(e instanceof Response)return json({error:await e.text()},e.status);throw e;}
     const body=await request.json(), current=String(body.currentKey||""), next=String(body.newKey||"");
-    if(!(await passwordVerify(current,u.key_hash))) return json({error:"Текущий пароль не подходит"},401);
+    if(!(await passwordVerify(current,u.key_hash,env))) return json({error:"Текущий пароль не подходит"},401);
     if(next.length<12||next.length>128) return json({error:"Пароль должен содержать от 12 до 128 символов"},400);
     const hash=await passwordHash(next);
     await env.DB.prepare("UPDATE users SET key_hash=?,key_fingerprint=?,must_change_password=0 WHERE id=?").bind(hash,await fingerprint(next),u.id).run();
@@ -122,18 +122,23 @@ async function handle(request,env) {
   if(method==="GET" && path==="/api/auth/me") return json({user:userView(u)});
   if(method==="GET" && path==="/api/admin/stats") {
     const a=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND status='active' AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)").first();
+    const b=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND key_hash<>'' AND status='blocked'").first();
     const k=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND key_hash<>''").first();
-    return json({activeUsers:a.n,issuedKeys:k.n});
+    return json({activeUsers:a.n,blockedUsers:b.n,issuedKeys:k.n});
   }
   if(method==="GET" && path==="/api/admin/users") {
-    const q=String(url.searchParams.get("q")||"").trim(); let rows;
-    if(!q) rows=(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' ORDER BY created_at DESC LIMIT 300").all()).results;
+    const q=String(url.searchParams.get("q")||"").trim();
+    const base="SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE u.role='user'";
+    let rows;
+    if(!q) rows=(await env.DB.prepare(base+" AND u.key_hash<>'' ORDER BY u.created_at DESC LIMIT 300").all()).results;
     else {
-      const byName=(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND username LIKE ? COLLATE NOCASE LIMIT 100").bind("%"+q.slice(0,80)+"%").all()).results;
-      const byKey=q.length>=8?(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND key_fingerprint=? LIMIT 20").bind(await fingerprint(q)).all()).results:[];
+      const byName=(await env.DB.prepare(base+" AND u.key_hash<>'' AND u.username LIKE ? COLLATE NOCASE LIMIT 100").bind("%"+q.slice(0,80)+"%").all()).results;
+      const byKey=q.length>=8?(await env.DB.prepare(base+" AND u.key_hash<>'' AND u.key_fingerprint=? LIMIT 20").bind(await fingerprint(q)).all()).results:[];
       rows=[...new Map([...byName,...byKey].map(x=>[x.id,x])).values()];
     }
-    return json({users:await Promise.all(rows.map(async x=>({id:x.id,username:x.username,status:userStatus(x),expiresAt:x.expires_at,maxDevices:x.max_devices,deviceCount:x.device_count,key:await decryptUserKey(x.key_hash,env)})))});
+    const revoked=(await env.DB.prepare(base+" AND u.key_hash='' ORDER BY u.created_at DESC LIMIT 100").all()).results;
+    const view=async x=>({id:x.id,username:x.username,status:userStatus(x),expiresAt:x.expires_at,createdAt:x.created_at,maxDevices:x.max_devices,deviceCount:x.device_count,key:await decryptUserKey(x.key_hash,env)});
+    return json({users:await Promise.all(rows.map(view)),revokedUsers:await Promise.all(revoked.map(view))});
   }
   if(method==="POST" && path==="/api/admin/users") {
     const body=await request.json(), username=String(body.username||"").trim(), days=Number(body.days), maxDevices=Number(body.maxDevices);
@@ -158,6 +163,29 @@ async function handle(request,env) {
     const x=await env.DB.prepare("SELECT username FROM users WHERE id=?").bind(Number(statusMatch[1])).first();
     await event(env,"user_status","Статус "+x.username+": "+status); return json({ok:true});
   }
+  const editMatch=path.match(/^\\/api\\/admin\\/users\\/(\\d+)$/);
+  if(method==="PATCH" && editMatch) {
+    const body=await request.json(), id=Number(editMatch[1]);
+    const username=String(body.username||"").trim(), days=Number(body.days), maxDevices=Number(body.maxDevices);
+    if(!/^[\\p{L}\\p{N}_.-]{3,32}$/u.test(username)) return json({error:"Некорректный ник"},400);
+    if(![0,7,30,90].includes(days)||![1,2].includes(maxDevices)) return json({error:"Недопустимые параметры"},400);
+    const target=await env.DB.prepare("SELECT id FROM users WHERE id=? AND role='user' AND key_hash<>''").bind(id).first();
+    if(!target) return json({error:"Пользователь не найден или ключ отозван"},404);
+    const expires=days===0?null:new Date(Date.now()+days*86400000).toISOString();
+    try { await env.DB.prepare("UPDATE users SET username=?,expires_at=?,max_devices=? WHERE id=? AND role='user'").bind(username,expires,maxDevices,id).run(); }
+    catch { return json({error:"Такой ник уже существует"},409); }
+    await event(env,"user_updated","Изменены данные пользователя: "+username);
+    return json({ok:true});
+  }
+  if(method==="DELETE" && editMatch) {
+    const id=Number(editMatch[1]), target=await env.DB.prepare("SELECT username,key_hash FROM users WHERE id=? AND role='user'").bind(id).first();
+    if(!target) return json({error:"Пользователь не найден"},404);
+    if(target.key_hash!=="") return json({error:"Сначала отзовите ключ"},409);
+    await env.DB.prepare("DELETE FROM devices WHERE user_id=?").bind(id).run();
+    await env.DB.prepare("DELETE FROM users WHERE id=? AND role='user' AND key_hash=''").bind(id).run();
+    await event(env,"revoked_user_deleted","Удалена запись отозванного ключа: "+target.username);
+    return json({ok:true});
+  }
   const keyMatch=path.match(/^\/api\/admin\/users\/(\d+)\/key$/);
   if(method==="PATCH" && keyMatch) {
     const body=await request.json(), next=String(body.key||"").trim();
@@ -176,6 +204,16 @@ async function handle(request,env) {
     const x=await env.DB.prepare("SELECT username FROM users WHERE id=?").bind(Number(revokeMatch[1])).first();
     await event(env,"key_revoked","Ключ отозван: "+x.username); return json({ok:true});
   }
+  const eventMatch=path.match(/^\\/api\\/admin\\/events\\/(\\d+)$/);
+  if(method==="DELETE" && eventMatch) {
+    const r=await env.DB.prepare("DELETE FROM events WHERE id=?").bind(Number(eventMatch[1])).run();
+    if(!r.meta.changes) return json({error:"Уведомление не найдено"},404);
+    return json({ok:true});
+  }
+  if(method==="DELETE" && path==="/api/admin/events") {
+    await env.DB.prepare("DELETE FROM events").run();
+    return json({ok:true});
+  }
   if(method==="GET" && path==="/api/admin/events") {
     const rows=(await env.DB.prepare("SELECT id,type,message,created_at,created_at AS createdAt FROM events ORDER BY id DESC LIMIT 100").all()).results;
     return json({events:rows});
@@ -185,11 +223,11 @@ async function handle(request,env) {
 export default {
   async fetch(request,env) {
     try {
-      if(request.method==="OPTIONS") return new Response(null,{status:204,headers:{ "access-control-allow-origin":"*", "access-control-allow-methods":"GET,POST,PATCH,OPTIONS", "access-control-allow-headers":"authorization,content-type" }});
+      if(request.method==="OPTIONS") return new Response(null,{status:204,headers:{ "access-control-allow-origin":"*", "access-control-allow-methods":"GET,POST,PATCH,DELETE,OPTIONS", "access-control-allow-headers":"authorization,content-type" }});
       const response=await handle(request,env);
       const headers=new Headers(response.headers);
       headers.set("access-control-allow-origin","*");
-      headers.set("access-control-allow-methods","GET,POST,PATCH,OPTIONS");
+      headers.set("access-control-allow-methods","GET,POST,PATCH,DELETE,OPTIONS");
       headers.set("access-control-allow-headers","authorization,content-type");
       return new Response(response.body,{status:response.status,headers});
     } catch(error) {
