@@ -2,11 +2,6 @@ name: Deploy IzviniteVpn auth API
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ feature/izvinitevpn-v2 ]
-    paths:
-      - 'cloudflare/**'
-      - '.github/workflows/deploy-auth.yml'
 
 permissions:
   contents: read
