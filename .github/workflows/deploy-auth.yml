@@ -1,0 +1,66 @@
+name: Deploy IzviniteVpn auth API
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ feature/izvinitevpn-v2 ]
+    paths:
+      - 'cloudflare/**'
+      - '.github/workflows/deploy-auth.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check deployment configuration
+        env:
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          D1_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+          API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ADMIN_KEY: ${{ secrets.ADMIN_BOOTSTRAP_KEY }}
+          JWT: ${{ secrets.JWT_SECRET }}
+        run: |
+          test -n "$ACCOUNT_ID" || (echo "Missing repository variable CLOUDFLARE_ACCOUNT_ID"; exit 1)
+          test -n "$D1_ID" || (echo "Missing repository variable CLOUDFLARE_D1_DATABASE_ID"; exit 1)
+          test -n "$API_TOKEN" || (echo "Missing secret CLOUDFLARE_API_TOKEN"; exit 1)
+          test -n "$ADMIN_KEY" || (echo "Missing secret ADMIN_BOOTSTRAP_KEY"; exit 1)
+          test -n "$JWT" || (echo "Missing secret JWT_SECRET"; exit 1)
+          test "${#JWT}" -ge 32 || (echo "JWT_SECRET must be at least 32 characters"; exit 1)
+      - name: Install Wrangler
+        run: npm install --global wrangler
+      - name: Configure D1 database ID
+        env:
+          D1_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+        run: sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$D1_ID/" cloudflare/wrangler.toml
+      - name: Apply D1 schema
+        working-directory: cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: wrangler d1 execute izvinitevpn --remote --file=schema.sql
+      - name: Set Worker secrets
+        working-directory: cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_BOOTSTRAP_KEY: ${{ secrets.ADMIN_BOOTSTRAP_KEY }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          printf '%s' "$ADMIN_BOOTSTRAP_KEY" | wrangler secret put ADMIN_BOOTSTRAP_KEY --name izvinitevpn-auth
+          printf '%s' "$JWT_SECRET" | wrangler secret put JWT_SECRET --name izvinitevpn-auth
+      - name: Deploy Worker
+        working-directory: cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          ADMIN_USERNAME: Aqsone
+        run: |
+          printf '%s' "$ADMIN_USERNAME" | wrangler secret put ADMIN_USERNAME --name izvinitevpn-auth
+          wrangler deploy
