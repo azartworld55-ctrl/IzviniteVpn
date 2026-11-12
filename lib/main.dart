@@ -76,8 +76,11 @@ class SessionGate extends StatefulWidget {
   @override State<SessionGate> createState() => _SessionGateState();
 }
 class _SessionGateState extends State<SessionGate> {
+  bool loading = true;
+  String? error;
   @override void initState() { super.initState(); restore(); }
   Future<void> restore() async {
+    if (mounted) setState(() { loading = true; error = null; });
     final p = await SharedPreferences.getInstance();
     final saved = p.getString('session_token');
     if (saved != null) {
@@ -86,6 +89,9 @@ class _SessionGateState extends State<SessionGate> {
         final me = await api.call('GET', '/auth/me');
         if (!mounted) return;
         openUser(me['user']);
+        return;
+      } on ApiUnavailableException catch (e) {
+        if (mounted) setState(() { error = e.message; loading = false; });
         return;
       } catch (_) {
         await p.remove('session_token');
@@ -98,8 +104,21 @@ class _SessionGateState extends State<SessionGate> {
     Navigator.pushReplacement(context, MaterialPageRoute(
       builder: (_) => user['role'] == 'admin' ? const AdminPage() : const HomePage()));
   }
-  @override Widget build(BuildContext c) => const Scaffold(
-    body: Center(child: CircularProgressIndicator(color: orange)));
+  @override Widget build(BuildContext c) => Scaffold(
+    body: Center(child: loading
+      ? const CircularProgressIndicator(color: orange)
+      : Padding(padding: const EdgeInsets.all(28), child: Column(
+          mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.cloud_off_rounded, color: orange, size: 44),
+            const SizedBox(height: 14),
+            const Text('Сервер авторизации недоступен', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            Text(error ?? 'Проверь подключение к интернету.', textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white60)),
+            const SizedBox(height: 18),
+            FilledButton(onPressed: restore, child: const Text('Повторить')),
+          ],
+        ))));
 }
 
 class LoginPage extends StatefulWidget { const LoginPage({super.key}); @override State<LoginPage> createState()=>_LoginState(); }
