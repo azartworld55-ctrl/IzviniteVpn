@@ -1,4 +1,5 @@
 name: Build IzviniteVpn APK
+# Trigger APK build after the auth API compatibility fix.
 
 on:
   workflow_dispatch:
