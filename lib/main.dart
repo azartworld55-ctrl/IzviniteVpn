@@ -13,6 +13,8 @@ const orange = Color(0xFFFF7A1A);
 const panel = Color(0xFF1B1B1B);
 final api = Api();
 
+class ApiException implements Exception {final int status;final String message;ApiException(this.status,this.message);@override String toString()=>message;}
+
 class Api {
   String? token;
   Uri uri(String p) => Uri.parse(apiUrl.replaceAll(RegExp(r'/$'), '') + '/api' + p);
@@ -22,9 +24,10 @@ class Api {
     final u=uri(path);
     final r=method=='GET' ? await http.get(u,headers:headers) : method=='PATCH'
       ? await http.patch(u,headers:headers,body:jsonEncode(body??{}))
+      : method=='DELETE' ? await http.delete(u,headers:headers)
       : await http.post(u,headers:headers,body:jsonEncode(body??{}));
     final d=r.body.isEmpty?<String,dynamic>{}:jsonDecode(r.body) as Map<String,dynamic>;
-    if(r.statusCode<200 || r.statusCode>=300) throw Exception(d['error']??'Ошибка сервера');
+    if(r.statusCode<200 || r.statusCode>=300) throw ApiException(r.statusCode,d['error']??'Ошибка сервера');
     return d;
   }
 }
@@ -161,13 +164,10 @@ abstract class SessionState<T extends StatefulWidget> extends State<T> with Widg
     try {
       await api.call('GET', '/auth/me');
       return true;
-    } catch (_) {
-      final p = await SharedPreferences.getInstance();
-      await p.remove('session_token');
-      api.token = null;
-      if (mounted) {
-        Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (_) => const LoginPage()), (_) => false);
+    } catch (e) {
+      if(e is ApiException && (e.status==401 || e.status==403)){
+        final p=await SharedPreferences.getInstance();await p.remove('session_token');api.token=null;
+        if(mounted)Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder:(_)=>const LoginPage()),(_)=>false);
       }
       return false;
     } finally {
@@ -186,64 +186,90 @@ abstract class SessionState<T extends StatefulWidget> extends State<T> with Widg
 
 class HomePage extends StatefulWidget{const HomePage({super.key});@override State<HomePage> createState()=>_HomeState();}
 class _HomeState extends SessionState<HomePage>{
-  List<SingBoxServerConfig> servers=[];final Map<String,int> ping={};List<String> recent=[];
-  StreamSubscription? pinger,statsSub;String down='0 B/s',up='0 B/s';bool busy=false;String? error,selected;
-  bool get connected=>SingBox.instance.status==SingBoxConnectionStatus.connected;
-  @override void initState(){super.initState();startSessionWatch();statsSub=SingBox.instance.watchConnectionStats().listen((s){if(mounted)setState(() { down=rate(s.downloadSpeed); up=rate(s.uploadSpeed); });});loadRecent();loadServers();}
+  List<SingBoxServerConfig> servers=[];final Map<String,int> ping={};
+  StreamSubscription? pinger,statsSub,statusSub,stateSub;
+  String down='0 B/s',up='0 B/s';bool busy=false,loadingServers=false,checkingPings=false,sortBestFirst=false,isAdmin=false;
+  String? error,selected,activeCountry;
+  SingBoxConnectionStatus connectionStatus=SingBox.instance.status;
+  bool get connected=>connectionStatus==SingBoxConnectionStatus.connected;
+  @override void initState(){super.initState();startSessionWatch();
+    statusSub=SingBox.instance.watchConnectionStatus().listen((v){if(mounted)setState(()=>connectionStatus=v);});
+    stateSub=SingBox.instance.watchConnectionState().listen((v){if(mounted&&v.error!=null)setState(()=>error='Ошибка VPN: ${v.error}');});
+    statsSub=SingBox.instance.watchConnectionStats().listen((s){if(mounted)setState(()=>{down=rate(s.downloadSpeed),up=rate(s.uploadSpeed)});});
+    loadRole();loadServers();
+  }
+  Future<void> loadRole()async{try{final d=await api.call('GET','/auth/me');if(mounted)setState(()=>isAdmin=d['user']['role']=='admin');}catch(_){if(mounted)setState(()=>error='Сервер авторизации недоступен.');}}
   String rate(int n)=>n<1024?'$n B/s':n<1048576?'${(n/1024).toStringAsFixed(1)} KB/s':'${(n/1048576).toStringAsFixed(1)} MB/s';
-  Future<void> loadRecent()async{final p=await SharedPreferences.getInstance();if(mounted)setState(()=>recent=p.getStringList('recent')??[]);}
-  Future<void> remember(String s)async{final p=await SharedPreferences.getInstance();final a=[s,...?p.getStringList('recent')].toSet().take(5).toList();await p.setStringList('recent',a);if(mounted)setState(()=>recent=a);}
   Future<void> loadServers()async{
-    setState(()=>busy=true);
+    if(mounted)setState(()=>loadingServers=true);
     try{final r=await http.get(Uri.parse(subUrl)).timeout(const Duration(seconds:25));if(r.statusCode!=200)throw Exception('HTTP ${r.statusCode}');
       await SingBox.instance.importServerConfigs(r.body,subscriptionId:'black-lte');final a=await SingBox.instance.getServerConfigs();
-      if(a.isEmpty)throw Exception('Нет поддерживаемых серверов');if(mounted)setState(()=>servers=a);testPings();
-    }catch(e){if(mounted)setState(()=>error=e.toString());}finally{if(mounted)setState(()=>busy=false);}
+      if(a.isEmpty)throw Exception('Нет поддерживаемых серверов');if(mounted)setState(()=>{servers=a,selected=selected??a.first.id,error=null});
+    }catch(e){if(mounted)setState(()=>error='Ошибка подписки: $e');}finally{if(mounted)setState(()=>loadingServers=false);}
   }
-  void testPings(){pinger?.cancel();ping.clear();pinger=SingBox.instance.pingServers(servers,concurrency:8).listen((r){if(mounted)setState(()=>ping[r.serverId ?? '']=r.success?r.ping:-1);});}
-  List<dynamic> get sorted{final a=[...servers];a.sort((x,y)=>(ping[x.id]??999999).compareTo(ping[y.id]??999999));return a;}
+  void testPings(){if(servers.isEmpty||checkingPings)return;pinger?.cancel();ping.clear();setState(()=>checkingPings=true);
+    pinger=SingBox.instance.pingServers(servers,concurrency:8).listen((r){if(mounted)setState(()=>ping[r.serverId??'']=r.success?r.ping:-1);},
+      onError:(e){if(mounted)setState(()=>{error='Ошибка проверки МС: $e',checkingPings=false});},
+      onDone:(){if(mounted)setState(()=>checkingPings=false);});
+  }
+  List<SingBoxServerConfig> get sorted{final a=[...servers];if(sortBestFirst)a.sort((x,y)=>(ping[x.id]??999999).compareTo(ping[y.id]??999999));return a;}
+  String countryFor(String name){
+    final n=name.toLowerCase();const m={'germany':'🇩🇪 Германия','deutsch':'🇩🇪 Германия','герман':'🇩🇪 Германия','netherlands':'🇳🇱 Нидерланды','holland':'🇳🇱 Нидерланды','finland':'🇫🇮 Финляндия','france':'🇫🇷 Франция','usa':'🇺🇸 США','united states':'🇺🇸 США','uk':'🇬🇧 Великобритания','sweden':'🇸🇪 Швеция','poland':'🇵🇱 Польша','turkey':'🇹🇷 Турция','japan':'🇯🇵 Япония','singapore':'🇸🇬 Сингапур','canada':'🇨🇦 Канада','switzerland':'🇨🇭 Швейцария','austria':'🇦🇹 Австрия','latvia':'🇱🇻 Латвия','estonia':'🇪🇪 Эстония','czech':'🇨🇿 Чехия','italy':'🇮🇹 Италия','spain':'🇪🇸 Испания','russia':'🇷🇺 Россия'};
+    for(final e in m.entries){if(n.contains(e.key))return e.value;}return '🌐 $name';
+  }
+  void announceCountry(String name){final v=countryFor(name);setState(()=>activeCountry=v);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Активная страна: $v'),duration:const Duration(seconds:3)));}
+  Future<void> loadServers()async{
   Future<void> connect({bool auto=false})async{
-    if(busy||servers.isEmpty)return;
-    if(!await ensureSession())return;setState(()=>busy=true);
-    try{
-      if(!connected)await SingBox.instance.connectToServers(servers);
-      if(auto){await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,SingBoxConfigBuilder.autoTag);await remember('Автовыбор');}
-      else{final s=servers.firstWhere((x)=>x.id==selected,orElse:()=>servers.first);await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,s.name);await remember(s.name);}
-    }catch(e){if(mounted)setState(()=>error=e.toString());}finally{if(mounted)setState(()=>busy=false);}
+    if(busy||servers.isEmpty)return;if(!await ensureSession()){setState(()=>error='Сервер авторизации недоступен.');return;}
+    setState(()=>{busy=true,error=null});
+    try{if(!connected)await SingBox.instance.connectToServers(servers);
+      if(auto){await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,SingBoxConfigBuilder.autoTag);final a=await SingBox.instance.getActiveServerConfig();if(a!=null){setState(()=>selected=a.id);announceCountry(a.name);}}
+      else{final s=servers.firstWhere((x)=>x.id==selected,orElse:()=>servers.first);await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,s.name);setState(()=>selected=s.id);announceCountry(s.name);}
+    }catch(e){if(mounted)setState(()=>error='Ошибка VPN: $e');}finally{if(mounted)setState(()=>busy=false);}
   }
-  Future<void> choose(dynamic s)async{
-    setState(()=>selected=s.id as String);
-    if(connected){try{await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,s.name as String);await remember(s.name as String);}catch(e){error=e.toString();}}
-    if(mounted)Navigator.pop(context);
+  Future<void> disconnectVpn()async{if(busy)return;setState(()=>busy=true);try{await SingBox.instance.disconnect();await SingBox.instance.waitForStatus(SingBoxConnectionStatus.disconnected);}catch(e){if(mounted)setState(()=>error='Ошибка VPN: $e');}finally{if(mounted)setState(()=>busy=false);}}
+  Future<void> choose(dynamic s)async{try{setState(()=>selected=s.id as String);if(connected)await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,s.name as String);if(mounted){announceCountry(s.name as String);Navigator.pop(context);}}catch(e){if(mounted)setState(()=>error='Ошибка выбора сервера: $e');}}
+  @override void dispose(){pinger?.cancel();statsSub?.cancel();statusSub?.cancel();stateSub?.cancel();super.dispose();}
+  @override Widget build(BuildContext c){
+    final label=connectionStatus==SingBoxConnectionStatus.connecting?'Подключение…':connectionStatus==SingBoxConnectionStatus.connected?'Подключено':connectionStatus==SingBoxConnectionStatus.disconnecting?'Отключение…':(error?.startsWith('Ошибка VPN:')??false)?'Ошибка':'Отключено';
+    final tint=label=='Подключено'?Colors.greenAccent:label=='Ошибка'?Colors.redAccent:orange;
+    return Scaffold(appBar:AppBar(title:const Text('IzviniteVpn'),actions:[if(isAdmin)IconButton(tooltip:'Панель администратора',onPressed:()=>Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const AdminPage())),icon:const Icon(Icons.admin_panel_settings,color:orange))]),
+      body:ListView(padding:const EdgeInsets.all(18),children:[
+        AnimatedContainer(duration:const Duration(milliseconds:350),padding:const EdgeInsets.all(22),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(24),border:Border.all(color:tint.withOpacity(.55))),
+          child:Column(children:[
+            AnimatedSwitcher(duration:const Duration(milliseconds:280),child:Icon(label=='Подключено'?Icons.verified_rounded:label=='Ошибка'?Icons.error_outline:Icons.shield_rounded,key:ValueKey(label),size:66,color:tint)),
+            const SizedBox(height:12),AnimatedSwitcher(duration:const Duration(milliseconds:250),child:Text(label,key:ValueKey(label),style:TextStyle(fontSize:25,fontWeight:FontWeight.bold,color:tint))),
+            if(label=='Подключение…')const Padding(padding:EdgeInsets.only(top:12),child:SizedBox(width:22,height:22,child:CircularProgressIndicator(strokeWidth:2,color:orange))),
+            if(activeCountry!=null&&connected)Padding(padding:const EdgeInsets.only(top:10),child:Text('Активная страна: $activeCountry')),
+            const SizedBox(height:20),
+            SizedBox(width:double.infinity,child:FilledButton(onPressed:busy?null:connected?disconnectVpn:()=>connect(),style:FilledButton.styleFrom(backgroundColor:orange,foregroundColor:Colors.black,padding:const EdgeInsets.symmetric(vertical:15)),child:Text(connected?'Отключиться':label=='Подключение…'?'Подключение…':'Подключиться'))),
+            const SizedBox(height:12),Row(children:[Expanded(child:OutlinedButton(onPressed:servers.isEmpty?null:openServers,child:const Text('Выбрать сервер'))),const SizedBox(width:8),Expanded(child:OutlinedButton(onPressed:busy||servers.isEmpty?null:()=>connect(auto:true),child:const Text('Автовыбор')))]),
+          ])),
+        card('Статистика',[line('Загрузка',down),line('Отдача',up)]),
+        if(loadingServers)const Padding(padding:EdgeInsets.all(12),child:Center(child:CircularProgressIndicator(color:orange))),
+        if(error!=null)Padding(padding:const EdgeInsets.only(top:12),child:Text(error!,style:const TextStyle(color:Colors.redAccent))),
+        const SizedBox(height:20),const Text('Автор: Юсупов И.',textAlign:TextAlign.center,style:TextStyle(color:Colors.white38)),
+      ]));
   }
-  @override void dispose(){pinger?.cancel();statsSub?.cancel();super.dispose();}
-  @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:const Text('IzviniteVpn')),
-    body:ListView(padding:const EdgeInsets.all(18),children:[
-      Container(padding:const EdgeInsets.all(22),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(24),border:Border.all(color:orange.withOpacity(.3))),
-        child:Column(children:[
-          Icon(Icons.shield_rounded,size:64,color:connected?Colors.greenAccent:orange),const SizedBox(height:12),
-          Text(connected?'Подключено':'Отключено',style:const TextStyle(fontSize:25,fontWeight:FontWeight.bold)),const SizedBox(height:20),
-          SizedBox(width:double.infinity,child:FilledButton(onPressed:busy?null:connected?()=>SingBox.instance.disconnect():()=>connect(),
-            style:FilledButton.styleFrom(backgroundColor:orange,foregroundColor:Colors.black),child:Text(connected?'Отключиться':'Подключиться'))),
-          const SizedBox(height:12),Row(children:[
-            Expanded(child:OutlinedButton(onPressed:servers.isEmpty?null:openServers,child:const Text('Выбрать сервер'))),
-            const SizedBox(width:8),Expanded(child:OutlinedButton(onPressed:servers.isEmpty?null:()=>connect(auto:true),child:const Text('Автовыбор'))),
-          ]),
-        ])),
-      card('Статистика',[line('Загрузка',down),line('Отдача',up)]),
-      if(recent.isNotEmpty)card('Последние серверы',recent.map((s)=>line(s,'')).toList()),
-      if(busy)const Center(child:CircularProgressIndicator(color:orange)),
-      if(error!=null)Text(error!,style:const TextStyle(color:Colors.redAccent)),
-      const SizedBox(height:20),const Text('Автор: Юсупов И.',textAlign:TextAlign.center,style:TextStyle(color:Colors.white38)),
-    ]));
   Widget card(String t,List<Widget> children)=>Container(margin:const EdgeInsets.only(top:14),padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(18)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(t,style:const TextStyle(fontWeight:FontWeight.bold)),...children]));
   Widget line(String a,String b)=>Padding(padding:const EdgeInsets.symmetric(vertical:5),child:Row(children:[Expanded(child:Text(a)),Text(b)]));
-  void openServers()=>showModalBottomSheet(context:context,isScrollControlled:true,backgroundColor:panel,builder:(c)=>SafeArea(child:SizedBox(height:MediaQuery.of(c).size.height*.8,child:Column(children:[
-    const Padding(padding:EdgeInsets.all(18),child:Text('Серверы · лучший сверху',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18))),
-    Expanded(child:ListView(children:sorted.map((s){final p=ping[s.id];return ListTile(title:Text(s.name as String),subtitle:Text(p==null?'Проверка…':p<0?'Недоступен':'$p мс'),trailing:selected==s.id?const Icon(Icons.check,color:orange):null,onTap:()=>choose(s));}).toList())),
-  ]))));
+  void openServers()=>showModalBottomSheet(context:context,isScrollControlled:true,backgroundColor:panel,builder:(c)=>StatefulBuilder(builder:(c,refresh)=>SafeArea(child:SizedBox(height:MediaQuery.of(c).size.height*.84,child:Column(children:[
+    const Padding(padding:EdgeInsets.all(18),child:Text('Выбор сервера',style:TextStyle(fontWeight:FontWeight.bold,fontSize:19))),
+    Wrap(spacing:6,alignment:WrapAlignment.center,children:[
+      OutlinedButton.icon(onPressed:checkingPings?null:(){testPings();refresh((){});},icon:const Icon(Icons.speed),label:Text(checkingPings?'Проверка…':'Проверить МС')),
+      OutlinedButton.icon(onPressed:loadingServers?null:(){loadServers();refresh((){});},icon:const Icon(Icons.refresh),label:const Text('Обновить подписку')),
+      OutlinedButton.icon(onPressed:(){setState(()=>sortBestFirst=!sortBestFirst);refresh((){});},icon:const Icon(Icons.sort),label:Text(sortBestFirst?'Исходный порядок':'Лучший сверху')),
+    ]),
+    Expanded(child:GridView.builder(padding:const EdgeInsets.all(12),gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:2,crossAxisSpacing:10,mainAxisSpacing:10,childAspectRatio:1.25),itemCount:sorted.length,itemBuilder:(c,i){
+      final v=sorted[i],p=ping[v.id],active=v.id==selected;
+      return InkWell(borderRadius:BorderRadius.circular(16),onTap:()=>choose(v),child:AnimatedContainer(duration:const Duration(milliseconds:220),padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:active?orange.withOpacity(.12):const Color(0xFF252525),borderRadius:BorderRadius.circular(16),border:Border.all(color:active?orange:Colors.white10,width:active?2:1)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+        Text(countryFor(v.name),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.bold)),
+        const SizedBox(height:7),Text(v.name,maxLines:2,overflow:TextOverflow.ellipsis,style:const TextStyle(fontSize:12,color:Colors.white70)),
+        const Spacer(),Row(children:[Expanded(child:Text(p==null?'—':p<0?'Timeout':'$p ms',style:const TextStyle(color:orange))),if(active)const Icon(Icons.check_circle,color:orange,size:18)]),
+      ]))));
+    })),
+  ])))));
 }
-
 class AdminPage extends StatefulWidget{const AdminPage({super.key});@override State<AdminPage> createState()=>_AdminState();}
 class _AdminState extends SessionState<AdminPage>{
   final search=TextEditingController();Map<String,dynamic> stats={};List<dynamic> users=[],events=[];bool busy=false;String? error;
