@@ -40,7 +40,7 @@ if (!db.prepare("SELECT id FROM users WHERE role='admin'").get()) {
 const app = express();
 app.disable('x-powered-by'); app.use(helmet()); app.use(express.json({limit:'16kb'}));
 app.use('/api/auth/login', rateLimit({windowMs:900000,limit:12,standardHeaders:true,legacyHeaders:false}));
-const tokenFor = u => jwt.sign({sub:String(u.id),role:u.role,mustChangePassword:!!u.must_change_password},JWT_SECRET,{expiresIn:'12h',issuer:'izvinitevpn'});
+const tokenFor = u => jwt.sign({sub:String(u.id),role:u.role,mustChangePassword:!!u.must_change_password},JWT_SECRET,{expiresIn:'365d',issuer:'izvinitevpn'});
 function auth(role) {
  return (req,res,next) => {
   try {
