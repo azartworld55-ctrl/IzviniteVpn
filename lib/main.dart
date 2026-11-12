@@ -213,8 +213,13 @@ class _HomeState extends SessionState<HomePage>{
       onDone:(){if(mounted)setState(()=>checkingPings=false);});
   }
   List<SingBoxServerConfig> get sorted{final a=[...servers];if(sortBestFirst)a.sort((x,y)=>(ping[x.id]??999999).compareTo(ping[y.id]??999999));return a;}
+  Future<void> restoreActiveServer()async{
+    if(!connected)return;
+    try{final a=await SingBox.instance.getActiveServerConfig();if(a!=null&&mounted){setState(()=>selected=a.id);activeCountry=countryFor(a.name);}}
+    catch(_){}
+  }
   String countryFor(String name){
-    final n=name.toLowerCase();const m={'germany':'🇩🇪 Германия','deutsch':'🇩🇪 Германия','герман':'🇩🇪 Германия','netherlands':'🇳🇱 Нидерланды','holland':'🇳🇱 Нидерланды','finland':'🇫🇮 Финляндия','france':'🇫🇷 Франция','usa':'🇺🇸 США','united states':'🇺🇸 США','uk':'🇬🇧 Великобритания','sweden':'🇸🇪 Швеция','poland':'🇵🇱 Польша','turkey':'🇹🇷 Турция','japan':'🇯🇵 Япония','singapore':'🇸🇬 Сингапур','canada':'🇨🇦 Канада','switzerland':'🇨🇭 Швейцария','austria':'🇦🇹 Австрия','latvia':'🇱🇻 Латвия','estonia':'🇪🇪 Эстония','czech':'🇨🇿 Чехия','italy':'🇮🇹 Италия','spain':'🇪🇸 Испания','russia':'🇷🇺 Россия'};
+    final n=name.toLowerCase();const m={'germany':'🇩🇪 Германия','deutsch':'🇩🇪 Германия','герман':'🇩🇪 Германия','германия':'🇩🇪 Германия','netherlands':'🇳🇱 Нидерланды','holland':'🇳🇱 Нидерланды','нидерланды':'🇳🇱 Нидерланды','finland':'🇫🇮 Финляндия','france':'🇫🇷 Франция','usa':'🇺🇸 США','united states':'🇺🇸 США','uk':'🇬🇧 Великобритания','sweden':'🇸🇪 Швеция','poland':'🇵🇱 Польша','turkey':'🇹🇷 Турция','japan':'🇯🇵 Япония','singapore':'🇸🇬 Сингапур','canada':'🇨🇦 Канада','switzerland':'🇨🇭 Швейцария','austria':'🇦🇹 Австрия','latvia':'🇱🇻 Латвия','estonia':'🇪🇪 Эстония','czech':'🇨🇿 Чехия','italy':'🇮🇹 Италия','spain':'🇪🇸 Испания','russia':'🇷🇺 Россия'};
     for(final e in m.entries){if(n.contains(e.key))return e.value;}return '🌐 $name';
   }
   void announceCountry(String name){final v=countryFor(name);setState(()=>activeCountry=v);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Активная страна: $v'),duration:const Duration(seconds:3)));}
@@ -234,6 +239,7 @@ class _HomeState extends SessionState<HomePage>{
     final tint=label=='Подключено'?Colors.greenAccent:label=='Ошибка'?Colors.redAccent:orange;
     return Scaffold(appBar:AppBar(title:const Text('IzviniteVpn'),actions:[if(isAdmin)IconButton(tooltip:'Панель администратора',onPressed:()=>Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const AdminPage())),icon:const Icon(Icons.admin_panel_settings,color:orange))]),
       body:ListView(padding:const EdgeInsets.all(18),children:[
+        if(activeCountry!=null&&connected)Container(margin:const EdgeInsets.only(bottom:12),padding:const EdgeInsets.symmetric(horizontal:14,vertical:12),decoration:BoxDecoration(color:orange.withOpacity(.12),borderRadius:BorderRadius.circular(14),border:Border.all(color:orange.withOpacity(.45))),child:Row(children:[const Icon(Icons.public,color:orange),const SizedBox(width:10),Expanded(child:Text('Активная страна: $activeCountry',style:const TextStyle(fontWeight:FontWeight.w600)))])),
         AnimatedContainer(duration:const Duration(milliseconds:350),padding:const EdgeInsets.all(22),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(24),border:Border.all(color:tint.withOpacity(.55))),
           child:Column(children:[
             AnimatedSwitcher(duration:const Duration(milliseconds:280),child:Icon(label=='Подключено'?Icons.verified_rounded:label=='Ошибка'?Icons.error_outline:Icons.shield_rounded,key:ValueKey(label),size:66,color:tint)),
@@ -241,7 +247,7 @@ class _HomeState extends SessionState<HomePage>{
             if(label=='Подключение…')const Padding(padding:EdgeInsets.only(top:12),child:SizedBox(width:22,height:22,child:CircularProgressIndicator(strokeWidth:2,color:orange))),
             if(activeCountry!=null&&connected)Padding(padding:const EdgeInsets.only(top:10),child:Text('Активная страна: $activeCountry')),
             const SizedBox(height:20),
-            SizedBox(width:double.infinity,child:FilledButton(onPressed:busy?null:connected?disconnectVpn:()=>connect(),style:FilledButton.styleFrom(backgroundColor:orange,foregroundColor:Colors.black,padding:const EdgeInsets.symmetric(vertical:15)),child:Text(connected?'Отключиться':label=='Подключение…'?'Подключение…':'Подключиться'))),
+            SizedBox(width:double.infinity,child:FilledButton(onPressed:busy?null:(){HapticFeedback.lightImpact();if(connected){disconnectVpn();}else{connect();}},style:FilledButton.styleFrom(backgroundColor:orange,foregroundColor:Colors.black,padding:const EdgeInsets.symmetric(vertical:15)),child:Text(connected?'Отключиться':label=='Подключение…'?'Подключение…':'Подключиться'))),
             const SizedBox(height:12),Row(children:[Expanded(child:OutlinedButton(onPressed:servers.isEmpty?null:openServers,child:const Text('Выбрать сервер'))),const SizedBox(width:8),Expanded(child:OutlinedButton(onPressed:busy||servers.isEmpty?null:()=>connect(auto:true),child:const Text('Автовыбор')))]),
           ])),
         card('Статистика',[line('Загрузка',down),line('Отдача',up)]),
@@ -261,7 +267,7 @@ class _HomeState extends SessionState<HomePage>{
     ]),
     Expanded(child:GridView.builder(padding:const EdgeInsets.all(12),gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:2,crossAxisSpacing:10,mainAxisSpacing:10,childAspectRatio:1.25),itemCount:sorted.length,itemBuilder:(c,i){
       final v=sorted[i],p=ping[v.id],active=v.id==selected;
-      return InkWell(borderRadius:BorderRadius.circular(16),onTap:()=>choose(v),child:AnimatedContainer(duration:const Duration(milliseconds:220),padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:active?orange.withOpacity(.12):const Color(0xFF252525),borderRadius:BorderRadius.circular(16),border:Border.all(color:active?orange:Colors.white10,width:active?2:1)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
+      return InkWell(borderRadius:BorderRadius.circular(16),onTap:(){HapticFeedback.selectionClick();choose(v);},child:AnimatedContainer(duration:const Duration(milliseconds:220),padding:const EdgeInsets.all(12),decoration:BoxDecoration(color:active?orange.withOpacity(.12):const Color(0xFF252525),borderRadius:BorderRadius.circular(16),border:Border.all(color:active?orange:Colors.white10,width:active?2:1)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
         Text(countryFor(v.name),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.bold)),
         const SizedBox(height:7),Text(v.name,maxLines:2,overflow:TextOverflow.ellipsis,style:const TextStyle(fontSize:12,color:Colors.white70)),
         const Spacer(),Row(children:[Expanded(child:Text(p==null?'—':p<0?'Timeout':'$p ms',style:const TextStyle(color:orange))),if(active)const Icon(Icons.check_circle,color:orange,size:18)]),
