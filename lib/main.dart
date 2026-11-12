@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sing_box/sing_box.dart';
@@ -250,14 +251,27 @@ class _AdminState extends SessionState<AdminPage>{
   @override void dispose(){search.dispose();super.dispose();}
   Future<void> load()async{setState(()=>busy=true);try{final a=await Future.wait([api.call('GET','/admin/stats'),api.call('GET','/admin/users'+(search.text.isEmpty?'':'?q=${Uri.encodeQueryComponent(search.text)}')),api.call('GET','/admin/events')]);if(mounted)setState(() { stats=a[0]; users=a[1]['users']; events=a[2]['events']; });}catch(e){error=e.toString();}finally{if(mounted)setState(()=>busy=false);}}
   Future<void> createUser()async{
-    final name=TextEditingController();int days=30,devices=1;
+    final name=TextEditingController(),keyInput=TextEditingController();int days=30,devices=1;
     final v=await showDialog<Map<String,dynamic>>(context:context,builder:(c)=>StatefulBuilder(builder:(c,refresh)=>AlertDialog(title:const Text('Новый пользователь'),content:Column(mainAxisSize:MainAxisSize.min,children:[
       TextField(controller:name,decoration:const InputDecoration(labelText:'Ник')),
+      const SizedBox(height:10),
+      TextField(controller:keyInput,decoration:const InputDecoration(labelText:'Ключ вручную (необязательно)',helperText:'Оставь пустым для автогенерации')),
       DropdownButtonFormField<int>(value:days,decoration:const InputDecoration(labelText:'Срок'),items:const [DropdownMenuItem(value:7,child:Text('7 дней')),DropdownMenuItem(value:30,child:Text('30 дней')),DropdownMenuItem(value:90,child:Text('90 дней')),DropdownMenuItem(value:0,child:Text('Без ограничения'))],onChanged:(x)=>refresh(()=>days=x??30)),
       DropdownButtonFormField<int>(value:devices,decoration:const InputDecoration(labelText:'Устройства'),items:const [DropdownMenuItem(value:1,child:Text('Одно')),DropdownMenuItem(value:2,child:Text('Два'))],onChanged:(x)=>refresh(()=>devices=x??1)),
-    ]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,{'username':name.text.trim(),'days':days,'maxDevices':devices}),child:const Text('Создать'))])));
+    ]),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,{'username':name.text.trim(),'key':keyInput.text.trim(),'days':days,'maxDevices':devices}),child:const Text('Создать'))])));
     if(v==null||(v['username'] as String).isEmpty)return;
     try{final r=await api.call('POST','/admin/users',v);if(!mounted)return;await showDialog<void>(context:context,builder:(c)=>AlertDialog(title:const Text('Ключ создан'),content:SelectableText('Ник: ${r['user']['username']}\nКлюч: ${r['key']}\nСохрани ключ сейчас.'),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Закрыть'))]));await load();}catch(e){setState(()=>error=e.toString());}
+  }
+  Future<void> setKey(dynamic u)async{
+    final controller=TextEditingController();
+    final value=await showDialog<String>(context:context,builder:(c)=>AlertDialog(
+      title:Text('Задать ключ: ${u['username']}'),
+      content:TextField(controller:controller,autofocus:true,decoration:const InputDecoration(labelText:'Новый ключ (12–128 символов)')),
+      actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('Отмена')),FilledButton(onPressed:()=>Navigator.pop(c,controller.text.trim()),child:const Text('Сохранить'))]));
+    if(value==null)return;
+    try{await api.call('PATCH','/admin/users/${u['id']}/key',{'key':value});await load();}
+    catch(e){if(mounted)setState(()=>error=e.toString());}
+    finally{controller.dispose();}
   }
   Future<void> toggle(dynamic u)async{try{await api.call('PATCH','/admin/users/${u['id']}/status',{'status':u['status']=='blocked'?'active':'blocked'});await load();}catch(e){setState(()=>error=e.toString());}}
   Future<void> revoke(dynamic u)async{
@@ -270,13 +284,14 @@ class _AdminState extends SessionState<AdminPage>{
     try{await api.call('POST','/admin/users/${u['id']}/revoke');await load();}
     catch(e){if(mounted)setState(()=>error=e.toString());}
   }
-  @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:const Text('Администрирование'),actions:[IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),
+  @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:const Text('Администрирование'),actions:[IconButton(tooltip:'Открыть VPN',onPressed:()=>Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const HomePage())),icon:const Icon(Icons.vpn_key,color:orange)),IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),
     floatingActionButton:FloatingActionButton.extended(onPressed:createUser,backgroundColor:orange,foregroundColor:Colors.black,icon:const Icon(Icons.person_add),label:const Text('Создать ключ')),
     body:RefreshIndicator(onRefresh:load,color:orange,child:ListView(padding:const EdgeInsets.all(16),children:[
       Row(children:[Expanded(child:stat('Активные',stats['activeUsers']??'—')),const SizedBox(width:10),Expanded(child:stat('Выданные ключи',stats['issuedKeys']??'—'))]),
       const SizedBox(height:16),TextField(controller:search,onSubmitted:(_)=>load(),decoration:InputDecoration(labelText:'Поиск по нику или ключу',suffixIcon:IconButton(onPressed:load,icon:const Icon(Icons.search)))),
       const SizedBox(height:12),const Text('Пользователи',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
-      ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']} · ${u['expiresAt']??'Без срока'} · ${u['deviceCount']}/${u['maxDevices']} устройств'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[
+      ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']} · ${u['expiresAt']??'Без срока'} · ${u['deviceCount']}/${u['maxDevices']} устройств\\nКлюч: ${u['key']??'недоступен (старый формат или отозван)'}'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[
+        if(u['key']!=null) IconButton(tooltip:'Скопировать ключ',onPressed:()=>Clipboard.setData(ClipboardData(text:u['key'])),icon:const Icon(Icons.copy,color:orange)) else IconButton(tooltip:'Задать новый ключ',onPressed:()=>setKey(u),icon:const Icon(Icons.edit,color:orange)),
         IconButton(onPressed:()=>toggle(u),icon:Icon(u['status']=='blocked'?Icons.lock_open:Icons.block,color:orange)),
         IconButton(onPressed:()=>revoke(u),icon:const Icon(Icons.key_off,color:Colors.redAccent)),
       ])))),

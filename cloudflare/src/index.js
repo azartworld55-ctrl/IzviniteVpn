@@ -11,7 +11,28 @@ async function passwordHash(password, salt = crypto.getRandomValues(new Uint8Arr
   return saltToString(salt) + "." + b64u(bits);
 }
 function saltToString(salt) { return b64u(salt); }
-async function passwordVerify(password, stored) {
+async function vaultKey(env) {
+  const raw = await crypto.subtle.digest("SHA-256", encoder.encode("izvinitevpn-key-vault-v1:" + env.JWT_SECRET));
+  return crypto.subtle.importKey("raw", raw, {name:"AES-GCM"}, false, ["encrypt","decrypt"]);
+}
+async function encryptUserKey(value, env) {
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const encrypted=await crypto.subtle.encrypt({name:"AES-GCM",iv},await vaultKey(env),encoder.encode(value));
+  return "enc1:"+b64u(iv)+":"+b64u(encrypted);
+}
+async function decryptUserKey(stored, env) {
+  const parts=String(stored||"").split(":");
+  if(parts.length!==3 || parts[0]!=="enc1") return null;
+  try {
+    const plain=await crypto.subtle.decrypt({name:"AES-GCM",iv:fromB64u(parts[1])},await vaultKey(env),fromB64u(parts[2]));
+    return new TextDecoder().decode(plain);
+  } catch { return null; }
+}
+async function passwordVerify(password, stored, env) {
+  if(String(stored||"").startsWith("enc1:")) {
+    const actual=await decryptUserKey(stored,env);
+    return actual!==null && constantTime(actual,password);
+  }
   const [saltPart, hashPart] = String(stored).split(".");
   if (!saltPart || !hashPart) return false;
   const actual = await passwordHash(password, fromB64u(saltPart));
@@ -57,7 +78,7 @@ async function currentUser(request, env, requireAdmin=false, allowPasswordChange
   const raw=request.headers.get("authorization")||"";
   const payload=await verify(raw.replace(/^Bearer\s+/i,""),env.JWT_SECRET);
   const u=await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(Number(payload.sub)).first();
-  if(!u || userStatus(u)!=="active") throw new Response("Доступ отозван, заблокирован или истёк",{status:401});
+  if(!u || !u.key_hash || userStatus(u)!=="active") throw new Response("Доступ отозван, заблокирован или истёк",{status:401});
   if(requireAdmin && u.role!=="admin") throw new Response("Недостаточно прав",{status:403});
   const path=new URL(request.url).pathname;
   if(u.must_change_password && !(allowPasswordChange && path==="/api/auth/change-password")) throw new Response("Сначала смените первоначальный пароль",{status:403});
@@ -74,7 +95,7 @@ async function handle(request,env) {
     const body=await request.json(), username=String(body.username||"").trim(), key=String(body.key||""), device=String(body.deviceId||"");
     if(!username||!key||device.length<16||device.length>128) return json({error:"Заполните ник, ключ и устройство"},400);
     const u=await env.DB.prepare("SELECT * FROM users WHERE username=? COLLATE NOCASE").bind(username).first();
-    if(!u || !(await passwordVerify(key,u.key_hash))) { await event(env,"auth_failed","Неудачная попытка входа: "+username.slice(0,48)); return json({error:"Неверный ник или ключ доступа"},401); }
+    if(!u || !(await passwordVerify(key,u.key_hash,env))) { await event(env,"auth_failed","Неудачная попытка входа: "+username.slice(0,48)); return json({error:"Неверный ник или ключ доступа"},401); }
     if(userStatus(u)!=="active") { await event(env,"access_denied","Отказ во входе: "+u.username); return json({error:userStatus(u)==="expired"?"Срок доступа истёк":"Учётная запись заблокирована"},403); }
     if(u.role!=="admin") {
       const known=await env.DB.prepare("SELECT id FROM devices WHERE user_id=? AND device_id=?").bind(u.id,device).first();
@@ -101,7 +122,7 @@ async function handle(request,env) {
   if(method==="GET" && path==="/api/auth/me") return json({user:userView(u)});
   if(method==="GET" && path==="/api/admin/stats") {
     const a=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND status='active' AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)").first();
-    const k=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user'").first();
+    const k=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND key_hash<>''").first();
     return json({activeUsers:a.n,issuedKeys:k.n});
   }
   if(method==="GET" && path==="/api/admin/users") {
@@ -112,13 +133,15 @@ async function handle(request,env) {
       const byKey=q.length>=8?(await env.DB.prepare("SELECT u.*,(SELECT COUNT(*) FROM devices d WHERE d.user_id=u.id) AS device_count FROM users u WHERE role='user' AND key_fingerprint=? LIMIT 20").bind(await fingerprint(q)).all()).results:[];
       rows=[...new Map([...byName,...byKey].map(x=>[x.id,x])).values()];
     }
-    return json({users:rows.map(x=>({id:x.id,username:x.username,status:userStatus(x),expiresAt:x.expires_at,maxDevices:x.max_devices,deviceCount:x.device_count}))});
+    return json({users:await Promise.all(rows.map(async x=>({id:x.id,username:x.username,status:userStatus(x),expiresAt:x.expires_at,maxDevices:x.max_devices,deviceCount:x.device_count,key:await decryptUserKey(x.key_hash,env)})))});
   }
   if(method==="POST" && path==="/api/admin/users") {
     const body=await request.json(), username=String(body.username||"").trim(), days=Number(body.days), maxDevices=Number(body.maxDevices);
     if(!/^[\p{L}\p{N}_.-]{3,32}$/u.test(username)) return json({error:"Ник: 3–32 буквы, цифры, точка, дефис или подчёркивание"},400);
     if(![0,7,30,90].includes(days)||![1,2].includes(maxDevices)) return json({error:"Недопустимые параметры ключа"},400);
-    const newKey=b64u(crypto.getRandomValues(new Uint8Array(32))), hash=await passwordHash(newKey), expires=days===0?null:new Date(Date.now()+days*86400000).toISOString();
+    const suppliedKey=String(body.key||"").trim();
+    if(suppliedKey && (suppliedKey.length<12 || suppliedKey.length>128)) return json({error:"Ключ должен содержать от 12 до 128 символов"},400);
+    const newKey=suppliedKey || b64u(crypto.getRandomValues(new Uint8Array(32))), hash=await encryptUserKey(newKey,env), expires=days===0?null:new Date(Date.now()+days*86400000).toISOString();
     try {
       const r=await env.DB.prepare("INSERT INTO users(username,role,key_hash,key_fingerprint,status,expires_at,max_devices) VALUES(?,'user',?,?,'active',?,?)").bind(username,hash,await fingerprint(newKey),expires,maxDevices).run();
       await event(env,"user_created","Создан пользователь: "+username);
@@ -129,15 +152,26 @@ async function handle(request,env) {
   if(method==="PATCH" && statusMatch) {
     const status=String((await request.json()).status||"");
     if(!["active","blocked"].includes(status)) return json({error:"Недопустимый статус"},400);
+    if(status==="active") { const target=await env.DB.prepare("SELECT key_hash FROM users WHERE id=? AND role='user'").bind(Number(statusMatch[1])).first(); if(!target || !target.key_hash) return json({error:"У этого пользователя ключ отозван. Создай новую учётную запись с новым ключом."},409); }
     const r=await env.DB.prepare("UPDATE users SET status=? WHERE id=? AND role='user'").bind(status,Number(statusMatch[1])).run();
     if(!r.meta.changes) return json({error:"Пользователь не найден"},404);
     const x=await env.DB.prepare("SELECT username FROM users WHERE id=?").bind(Number(statusMatch[1])).first();
     await event(env,"user_status","Статус "+x.username+": "+status); return json({ok:true});
   }
+  const keyMatch=path.match(/^\/api\/admin\/users\/(\d+)\/key$/);
+  if(method==="PATCH" && keyMatch) {
+    const body=await request.json(), next=String(body.key||"").trim();
+    if(next.length<12 || next.length>128) return json({error:"Ключ должен содержать от 12 до 128 символов"},400);
+    const id=Number(keyMatch[1]), target=await env.DB.prepare("SELECT username FROM users WHERE id=? AND role='user'").bind(id).first();
+    if(!target) return json({error:"Пользователь не найден"},404);
+    await env.DB.prepare("UPDATE users SET key_hash=?,key_fingerprint=?,status='active' WHERE id=? AND role='user'").bind(await encryptUserKey(next,env),await fingerprint(next),id).run();
+    await event(env,"key_reset","Ключ обновлён: "+target.username);
+    return json({ok:true});
+  }
   const revokeMatch=path.match(/^\/api\/admin\/users\/(\d+)\/revoke$/);
   if(method==="POST" && revokeMatch) {
-    const replacement=b64u(crypto.getRandomValues(new Uint8Array(32)));
-    const r=await env.DB.prepare("UPDATE users SET status='blocked',key_hash=?,key_fingerprint=? WHERE id=? AND role='user'").bind(await passwordHash(replacement),await fingerprint(replacement),Number(revokeMatch[1])).run();
+    const r=await env.DB.prepare("UPDATE users SET status='blocked',key_hash='',key_fingerprint='' WHERE id=? AND role='user'").bind(Number(revokeMatch[1])).run();
+    await env.DB.prepare("DELETE FROM devices WHERE user_id=?").bind(Number(revokeMatch[1])).run();
     if(!r.meta.changes) return json({error:"Пользователь не найден"},404);
     const x=await env.DB.prepare("SELECT username FROM users WHERE id=?").bind(Number(revokeMatch[1])).first();
     await event(env,"key_revoked","Ключ отозван: "+x.username); return json({ok:true});
