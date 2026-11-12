@@ -186,6 +186,7 @@ abstract class SessionState<T extends StatefulWidget> extends State<T> with Widg
           SnackBar(content: Text(e.message)));
         return false;
       }
+      try { await SingBox.instance.disconnect(); } catch (_) {}
       final p = await SharedPreferences.getInstance();
       await p.remove('session_token');
       api.token = null;
@@ -315,7 +316,17 @@ class _HomeState extends SessionState<HomePage> {
     for (final value in names) {
       if (cleaned.toLowerCase().contains(value.toLowerCase())) return value;
     }
-    return cleaned.isEmpty ? 'Сервер' : cleaned;
+    final byFlag = <String, String>{
+      '🇩🇪':'Германия','🇳🇱':'Нидерланды','🇫🇷':'Франция','🇬🇧':'Великобритания',
+      '🇺🇸':'США','🇫🇮':'Финляндия','🇸🇪':'Швеция','🇳🇴':'Норвегия',
+      '🇨🇭':'Швейцария','🇵🇱':'Польша','🇦🇹':'Австрия','🇧🇪':'Бельгия',
+      '🇪🇸':'Испания','🇮🇹':'Италия','🇨🇦':'Канада','🇯🇵':'Япония',
+      '🇸🇬':'Сингапур','🇹🇷':'Турция','🇱🇻':'Латвия','🇪🇪':'Эстония',
+      '🇱🇹':'Литва','🇷🇴':'Румыния','🇧🇬':'Болгария','🇭🇰':'Гонконг',
+      '🇰🇷':'Южная Корея','🇦🇺':'Австралия','🇷🇺':'Россия','🇺🇦':'Украина',
+    };
+    final flag = flagFor(name);
+    return byFlag[flag] ?? (cleaned.isEmpty ? 'Сервер' : cleaned);
   }
 
   Future<void> loadServers() async {
@@ -841,32 +852,14 @@ class _AdminState extends SessionState<AdminPage> {
           suffixIcon: IconButton(onPressed: () { search.clear(); load(); }, icon: const Icon(Icons.close)),
         )),
         const SizedBox(height: 16),
-        const Text('Пользователи', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-        if (users.isEmpty) const Padding(padding: EdgeInsets.all(12),
-          child: Text('Нет действующих пользователей', style: TextStyle(color: Colors.white54))),
-        ...users.map((user) => Card(color: panel, margin: const EdgeInsets.only(top: 8),
-          child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Column(children: [
-            ListTile(
-              title: Text(user['username'] ?? ''),
-              subtitle: Text((user['status'] ?? '') + ' · выдан: ' + (user['createdAt'] ?? '—') + '\n' +
-                (user['expiresAt'] ?? 'Без срока') + ' · ' + user['deviceCount'].toString() + '/' +
-                user['maxDevices'].toString() + ' устройств'),
-              isThreeLine: true,
-            ),
-            if (user['key'] != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: SelectableText('Ключ: ' + user['key'])),
-            Wrap(alignment: WrapAlignment.end, children: [
-              IconButton(tooltip: 'Копировать ключ', onPressed: user['key'] == null ? null :
-                () => Clipboard.setData(ClipboardData(text: user['key'])), icon: const Icon(Icons.copy, color: orange)),
-              IconButton(tooltip: 'Изменить данные', onPressed: () => editUser(user), icon: const Icon(Icons.edit, color: orange)),
-              IconButton(tooltip: 'Новый ключ', onPressed: () => setKey(user), icon: const Icon(Icons.key, color: orange)),
-              IconButton(tooltip: user['status'] == 'blocked' ? 'Разблокировать' : 'Заблокировать',
-                onPressed: () => toggleUser(user),
-                icon: Icon(user['status'] == 'blocked' ? Icons.lock_open : Icons.block, color: orange)),
-              IconButton(tooltip: 'Отозвать ключ', onPressed: () => revokeUser(user),
-                icon: const Icon(Icons.key_off, color: Colors.redAccent)),
-            ]),
-          ])))),
+        const Text('Активные пользователи', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        ...users.where((u) => u['status'] == 'active').map(_userCard),
+        const SizedBox(height: 14),
+        const Text('Заблокированные пользователи', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        ...users.where((u) => u['status'] == 'blocked').map(_userCard),
+        const SizedBox(height: 14),
+        const Text('Истёкший срок', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        ...users.where((u) => u['status'] == 'expired').map(_userCard),
         const SizedBox(height: 18),
         const Text('Отозванные ключи', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
         ...revokedUsers.map((user) => Card(color: panel, child: ListTile(
@@ -894,6 +887,32 @@ class _AdminState extends SessionState<AdminPage> {
           child: Text(error!, style: const TextStyle(color: Colors.redAccent))),
       ],
     )),
+  );
+
+  Widget _userCard(dynamic user) => Card(
+    color: panel, margin: const EdgeInsets.only(top: 8),
+    child: Padding(padding: const EdgeInsets.symmetric(vertical: 6), child: Column(children: [
+      ListTile(
+        title: Text(user['username'] ?? ''),
+        subtitle: Text((user['status'] ?? '') + ' · выдан: ' + (user['createdAt'] ?? '—') + '\n' +
+          (user['expiresAt'] ?? 'Без срока') + ' · ' + user['deviceCount'].toString() + '/' +
+          user['maxDevices'].toString() + ' устройств'),
+        isThreeLine: true,
+      ),
+      if (user['key'] != null) Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: SelectableText('Ключ: ' + user['key'])),
+      Wrap(alignment: WrapAlignment.end, children: [
+        IconButton(tooltip: 'Копировать ключ', onPressed: user['key'] == null ? null :
+          () => Clipboard.setData(ClipboardData(text: user['key'])), icon: const Icon(Icons.copy, color: orange)),
+        IconButton(tooltip: 'Изменить данные', onPressed: () => editUser(user), icon: const Icon(Icons.edit, color: orange)),
+        IconButton(tooltip: 'Новый ключ', onPressed: () => setKey(user), icon: const Icon(Icons.key, color: orange)),
+        IconButton(tooltip: user['status'] == 'blocked' ? 'Разблокировать' : 'Заблокировать',
+          onPressed: () => toggleUser(user),
+          icon: Icon(user['status'] == 'blocked' ? Icons.lock_open : Icons.block, color: orange)),
+        IconButton(tooltip: 'Отозвать ключ', onPressed: () => revokeUser(user),
+          icon: const Icon(Icons.key_off, color: Colors.redAccent)),
+      ]),
+    ])),
   );
 
   Widget _stat(String title, dynamic value) => AnimatedContainer(
