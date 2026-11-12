@@ -247,6 +247,25 @@ class _HomeState extends SessionState<HomePage> {
   bool get connected => vpnStatus == SingBoxConnectionStatus.connected;
   bool get busy => connecting || loadingSubscription || checkingPing;
 
+  // Mirror sing_box.connectToServers() tag generation so duplicate display
+  // names still map back to their stable profile IDs.
+  Map<String, SingBoxServerConfig> get _serverByOutboundTag {
+    final result = <String, SingBoxServerConfig>{};
+    final usedTags = <String>{SingBoxConfigBuilder.proxyTag, SingBoxConfigBuilder.autoTag, SingBoxConfigBuilder.directTag};
+    for (final server in servers) {
+      if (!server.enabled || server.outbound == null) continue;
+      var tag = server.name.isNotEmpty ? server.name : server.id;
+      if (usedTags.contains(tag)) {
+        var index = 2;
+        while (usedTags.contains('$tag ($index)')) { index++; }
+        tag = '$tag ($index)';
+      }
+      usedTags.add(tag);
+      result[tag] = server;
+    }
+    return result;
+  }
+
   @override void initState() {
     super.initState();
     startSessionWatch();
@@ -388,12 +407,26 @@ class _HomeState extends SessionState<HomePage> {
         await SingBox.instance.connectToServers(servers, selectedId: selected);
         await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
       }
-      await for (final result in SingBox.instance.pingServers(
-        servers, concurrency: 4, timeout: const Duration(seconds: 8))) {
-        final id = result.serverId;
-        if (id != null && mounted) {
-          setState(() => ping[id] = result.success ? result.ping : -1);
+      final testedAt = DateTime.now().subtract(const Duration(seconds: 1));
+      final group = await SingBox.instance.testGroup(
+        SingBoxConfigBuilder.autoTag,
+        timeout: const Duration(seconds: 90),
+      );
+      if (group != null) {
+        final byTag = _serverByOutboundTag;
+        for (final item in group.items) {
+          final server = byTag[item.tag];
+          if (server != null && item.urlTestTime != null && !item.urlTestTime!.isBefore(testedAt) && mounted) {
+            setState(() => ping[server.id] = item.urlTestDelay ?? -1);
+          }
         }
+      } else {
+        // Single-server configurations have no auto URL-test group.
+        final tag = await SingBox.instance.currentOutboundTag();
+        if (tag == null) throw Exception('Не удалось определить активный прокси-сервер.');
+        final result = await SingBox.instance.pingOutbound(tag, timeout: const Duration(seconds: 20));
+        final server = _serverByOutboundTag[tag];
+        if (server != null && mounted) setState(() => ping[server.id] = result.success ? result.ping : -1);
       }
       if (mounted) setState(() => sortedByPing = false);
     } catch (e) {
@@ -438,10 +471,6 @@ class _HomeState extends SessionState<HomePage> {
       final selectedId = auto ? null : (selected ?? servers.first.id);
       await SingBox.instance.connectToServers(servers, selectedId: selectedId);
       await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
-      final health = await SingBox.instance.pingCurrentServer(timeout: const Duration(seconds: 15));
-      if (!health.success && mounted) {
-        setState(() => vpnError = 'Туннель запущен, но проверка интернета через сервер не прошла: ${health.errorMessage ?? 'нет ответа'}');
-      }
     } catch (e) {
       if (mounted) setState(() => vpnError = e.toString());
     } finally {
@@ -473,10 +502,6 @@ class _HomeState extends SessionState<HomePage> {
         // sing_box disambiguates duplicate outbound tags internally.
         await SingBox.instance.connectToServers(servers, selectedId: server.id);
         await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
-        final health = await SingBox.instance.pingCurrentServer(timeout: const Duration(seconds: 15));
-        if (!health.success && mounted) {
-          setState(() => vpnError = 'Сервер выбран, но HTTP-проверка через прокси не прошла: ${health.errorMessage ?? 'нет ответа'}');
-        }
       }
       if (mounted) Navigator.pop(context);
     } catch (e) {
@@ -675,7 +700,7 @@ class _HomeState extends SessionState<HomePage> {
                       if (active) const Icon(Icons.check_circle, color: orange, size: 18)]),
                     Text(countryFor(server.name), maxLines: 2, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontWeight: FontWeight.w700)),
-                    Text(latency == null ? 'Проверка: —' : latency < 0 ? 'Не прошёл тест' : 'Работает · $latency мс',
+                    Text(latency == null ? 'Не проверен' : latency < 0 ? 'Не прошёл тест' : 'Работает · $latency мс',
                       style: TextStyle(fontSize: 12, color: latency != null && latency >= 0 ? Colors.greenAccent : latency != null ? Colors.redAccent : Colors.white54)),
                   ]),
                 ),
