@@ -47,7 +47,38 @@ class App extends StatelessWidget {
   @override Widget build(BuildContext c)=>MaterialApp(title:'IzviniteVpn',debugShowCheckedModeBanner:false,
     theme:ThemeData(brightness:Brightness.dark,scaffoldBackgroundColor:const Color(0xFF101010),
       colorScheme:ColorScheme.fromSeed(seedColor:orange,brightness:Brightness.dark,surface:panel),useMaterial3:true),
-    home:const LoginPage());
+    home:const SessionGate());
+}
+
+class SessionGate extends StatefulWidget {
+  const SessionGate({super.key});
+  @override State<SessionGate> createState() => _SessionGateState();
+}
+class _SessionGateState extends State<SessionGate> {
+  @override void initState() { super.initState(); restore(); }
+  Future<void> restore() async {
+    final p = await SharedPreferences.getInstance();
+    final saved = p.getString('session_token');
+    if (saved != null) {
+      api.token = saved;
+      try {
+        final me = await api.call('GET', '/auth/me');
+        if (!mounted) return;
+        openUser(me['user']);
+        return;
+      } catch (_) {
+        await p.remove('session_token');
+        api.token = null;
+      }
+    }
+    if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
+  }
+  void openUser(dynamic user) {
+    Navigator.pushReplacement(context, MaterialPageRoute(
+      builder: (_) => user['role'] == 'admin' ? const AdminPage() : const HomePage()));
+  }
+  @override Widget build(BuildContext c) => const Scaffold(
+    body: Center(child: CircularProgressIndicator(color: orange)));
 }
 
 class LoginPage extends StatefulWidget { const LoginPage({super.key}); @override State<LoginPage> createState()=>_LoginState(); }
@@ -57,7 +88,9 @@ class _LoginState extends State<LoginPage> {
     setState(()=>busy=true); error=null;
     try {
       final d=await api.call('POST','/auth/login',{'username':n.text.trim(),'key':k.text,'deviceId':await deviceId()});
-      api.token=d['token']; final p=await SharedPreferences.getInstance(); await p.setString('session_token',api.token!);
+      api.token=d['token'];
+      final p=await SharedPreferences.getInstance();
+      await p.setString('session_token',api.token!);
       if(!mounted)return;
       final u=d['user'];
       Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>d['mustChangePassword']==true
@@ -66,20 +99,25 @@ class _LoginState extends State<LoginPage> {
     finally{if(mounted)setState(()=>busy=false);}
   }
   @override void dispose(){n.dispose();k.dispose();super.dispose();}
-  @override Widget build(BuildContext c)=>Scaffold(body:SafeArea(child:Center(child:SingleChildScrollView(padding:const EdgeInsets.all(24),
-    child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:420),child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
-      const Icon(Icons.shield_rounded,color:orange,size:76),const SizedBox(height:12),
-      const Text('IzviniteVpn',textAlign:TextAlign.center,style:TextStyle(fontSize:30,fontWeight:FontWeight.w800)),
-      const SizedBox(height:34),
-      TextField(controller:n,decoration:const InputDecoration(labelText:'Ник пользователя',prefixIcon:Icon(Icons.person_outline))),
-      const SizedBox(height:14),
-      TextField(controller:k,obscureText:true,onSubmitted:(_)=>login(),decoration:const InputDecoration(labelText:'Ключ доступа',prefixIcon:Icon(Icons.key))),
-      if(error!=null)Padding(padding:const EdgeInsets.only(top:12),child:Text(error!,style:const TextStyle(color:Colors.redAccent))),
-      const SizedBox(height:22),
-      FilledButton(onPressed:busy||apiUrl.isEmpty?null:login,style:FilledButton.styleFrom(backgroundColor:orange,foregroundColor:Colors.black),
-        child:Text(busy?'Проверка…':'Войти')),
-      if(apiUrl.isEmpty)const Padding(padding:EdgeInsets.only(top:12),child:Text('Сервер авторизации ещё не настроен.',textAlign:TextAlign.center)),
-    ]))))));
+  @override Widget build(BuildContext c)=>Scaffold(body:SafeArea(child:Center(child:SingleChildScrollView(
+    padding:const EdgeInsets.all(24),
+    child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:420),child:Column(
+      crossAxisAlignment:CrossAxisAlignment.stretch,children:[
+        const Icon(Icons.shield_rounded,color:orange,size:76),
+        const SizedBox(height:12),
+        const Text('IzviniteVpn',textAlign:TextAlign.center,style:TextStyle(fontSize:30,fontWeight:FontWeight.w800)),
+        const SizedBox(height:34),
+        TextField(controller:n,decoration:const InputDecoration(labelText:'Ник пользователя',prefixIcon:Icon(Icons.person_outline))),
+        const SizedBox(height:14),
+        TextField(controller:k,obscureText:true,onSubmitted:(_)=>login(),decoration:const InputDecoration(labelText:'Ключ доступа',prefixIcon:Icon(Icons.key))),
+        if(error!=null) Padding(padding:const EdgeInsets.only(top:12),child:Text(error!,style:const TextStyle(color:Colors.redAccent))),
+        const SizedBox(height:22),
+        FilledButton(onPressed:busy||apiUrl.isEmpty?null:login,
+          style:FilledButton.styleFrom(backgroundColor:orange,foregroundColor:Colors.black),
+          child:Text(busy?'Проверка…':'Войти')),
+        if(apiUrl.isEmpty) const Padding(padding:EdgeInsets.only(top:12),
+          child:Text('Сервер авторизации ещё не настроен.',textAlign:TextAlign.center)),
+      ]))))));
   }
 }
 
@@ -109,12 +147,49 @@ class _ChangePasswordState extends State<ChangePasswordPage>{
   ]));
 }
 
+abstract class SessionState<T extends StatefulWidget> extends State<T> with WidgetsBindingObserver {
+  Timer? _sessionTimer;
+  bool _checkingSession = false;
+  void startSessionWatch() {
+    WidgetsBinding.instance.addObserver(this);
+    _sessionTimer = Timer.periodic(const Duration(minutes: 15), (_) => ensureSession());
+  }
+  Future<bool> ensureSession() async {
+    if (_checkingSession || !mounted) return true;
+    if (api.token == null) return false;
+    _checkingSession = true;
+    try {
+      await api.call('GET', '/auth/me');
+      return true;
+    } catch (_) {
+      final p = await SharedPreferences.getInstance();
+      await p.remove('session_token');
+      api.token = null;
+      if (mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginPage()), (_) => false);
+      }
+      return false;
+    } finally {
+      _checkingSession = false;
+    }
+  }
+  @override void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) ensureSession();
+  }
+  @override void dispose() {
+    _sessionTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+}
+
 class HomePage extends StatefulWidget{const HomePage({super.key});@override State<HomePage> createState()=>_HomeState();}
-class _HomeState extends State<HomePage>{
-  List<dynamic> servers=[];final Map<String,int> ping={};List<String> recent=[];
+class _HomeState extends SessionState<HomePage>{
+  List<SingBoxServerConfig> servers=[];final Map<String,int> ping={};List<String> recent=[];
   StreamSubscription? pinger,statsSub;String down='0 B/s',up='0 B/s';bool busy=false;String? error,selected;
   bool get connected=>SingBox.instance.status==SingBoxConnectionStatus.connected;
-  @override void initState(){super.initState();statsSub=SingBox.instance.watchConnectionStats().listen((s){if(mounted)setState(() { down=rate(s.downloadSpeed); up=rate(s.uploadSpeed); });});loadRecent();loadServers();}
+  @override void initState(){super.initState();startSessionWatch();statsSub=SingBox.instance.watchConnectionStats().listen((s){if(mounted)setState(() { down=rate(s.downloadSpeed); up=rate(s.uploadSpeed); });});loadRecent();loadServers();}
   String rate(int n)=>n<1024?'$n B/s':n<1048576?'${(n/1024).toStringAsFixed(1)} KB/s':'${(n/1048576).toStringAsFixed(1)} MB/s';
   Future<void> loadRecent()async{final p=await SharedPreferences.getInstance();if(mounted)setState(()=>recent=p.getStringList('recent')??[]);}
   Future<void> remember(String s)async{final p=await SharedPreferences.getInstance();final a=[s,...?p.getStringList('recent')].toSet().take(5).toList();await p.setStringList('recent',a);if(mounted)setState(()=>recent=a);}
@@ -125,10 +200,11 @@ class _HomeState extends State<HomePage>{
       if(a.isEmpty)throw Exception('Нет поддерживаемых серверов');if(mounted)setState(()=>servers=a);testPings();
     }catch(e){if(mounted)setState(()=>error=e.toString());}finally{if(mounted)setState(()=>busy=false);}
   }
-  void testPings(){pinger?.cancel();ping.clear();pinger=SingBox.instance.pingServers(servers,concurrency:8).listen((r){if(mounted)setState(()=>ping[r.serverId]=r.success?r.ping:-1);});}
+  void testPings(){pinger?.cancel();ping.clear();pinger=SingBox.instance.pingServers(servers,concurrency:8).listen((r){if(mounted)setState(()=>ping[r.serverId ?? '']=r.success?r.ping:-1);});}
   List<dynamic> get sorted{final a=[...servers];a.sort((x,y)=>(ping[x.id]??999999).compareTo(ping[y.id]??999999));return a;}
   Future<void> connect({bool auto=false})async{
-    if(busy||servers.isEmpty)return;setState(()=>busy=true);
+    if(busy||servers.isEmpty)return;
+    if(!await ensureSession())return;setState(()=>busy=true);
     try{
       if(!connected)await SingBox.instance.connectToServers(servers);
       if(auto){await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,SingBoxConfigBuilder.autoTag);await remember('Автовыбор');}
@@ -169,9 +245,9 @@ class _HomeState extends State<HomePage>{
 }
 
 class AdminPage extends StatefulWidget{const AdminPage({super.key});@override State<AdminPage> createState()=>_AdminState();}
-class _AdminState extends State<AdminPage>{
+class _AdminState extends SessionState<AdminPage>{
   final search=TextEditingController();Map<String,dynamic> stats={};List<dynamic> users=[],events=[];bool busy=false;String? error;
-  @override void initState(){super.initState();load();}
+  @override void initState(){super.initState();startSessionWatch();load();}
   @override void dispose(){search.dispose();super.dispose();}
   Future<void> load()async{setState(()=>busy=true);try{final a=await Future.wait([api.call('GET','/admin/stats'),api.call('GET','/admin/users'+(search.text.isEmpty?'':'?q=${Uri.encodeQueryComponent(search.text)}')),api.call('GET','/admin/events')]);if(mounted)setState(() { stats=a[0]; users=a[1]['users']; events=a[2]['events']; });}catch(e){error=e.toString();}finally{if(mounted)setState(()=>busy=false);}}
   Future<void> createUser()async{
