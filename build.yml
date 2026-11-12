@@ -1,0 +1,52 @@
+name: Build IzviniteVpn APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Generate Android host project
+        run: |
+          flutter create --platforms=android --org ru.yusupov --project-name izvinitevpn build_src
+          cp pubspec.yaml build_src/pubspec.yaml
+          rm -rf build_src/lib
+          cp -R lib build_src/lib
+          sed -i 's/android:label="build_src"/android:label="IzviniteVpn"/' build_src/android/app/src/main/AndroidManifest.xml
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' build_src/android/app/build.gradle.kts
+          cd build_src
+          flutter pub get
+
+      - name: Build APK
+        run: |
+          cd build_src
+          flutter build apk --debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: IzviniteVpn-debug-apk
+          path: build_src/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
