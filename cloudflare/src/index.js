@@ -167,7 +167,7 @@ async function handle(request,env) {
   if(method==="PATCH" && editMatch) {
     const body=await request.json(), id=Number(editMatch[1]);
     const username=String(body.username||"").trim(), days=Number(body.days), maxDevices=Number(body.maxDevices);
-    if(!/^[\\p{L}\\p{N}_.-]{3,32}$/u.test(username)) return json({error:"Некорректный ник"},400);
+    if(!/^[\p{L}\p{N}_.-]{3,32}$/u.test(username)) return json({error:"Некорректный ник"},400);
     if(![0,7,30,90].includes(days)||![1,2].includes(maxDevices)) return json({error:"Недопустимые параметры"},400);
     const target=await env.DB.prepare("SELECT id FROM users WHERE id=? AND role='user' AND key_hash<>''").bind(id).first();
     if(!target) return json({error:"Пользователь не найден или ключ отозван"},404);
