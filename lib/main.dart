@@ -118,7 +118,6 @@ class _LoginState extends State<LoginPage> {
         if(apiUrl.isEmpty) const Padding(padding:EdgeInsets.only(top:12),
           child:Text('Сервер авторизации ещё не настроен.',textAlign:TextAlign.center)),
       ]))))));
-  }
 }
 
 class ChangePasswordPage extends StatefulWidget {
@@ -241,7 +240,7 @@ class _HomeState extends SessionState<HomePage>{
   void openServers()=>showModalBottomSheet(context:context,isScrollControlled:true,backgroundColor:panel,builder:(c)=>SafeArea(child:SizedBox(height:MediaQuery.of(c).size.height*.8,child:Column(children:[
     const Padding(padding:EdgeInsets.all(18),child:Text('Серверы · лучший сверху',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18))),
     Expanded(child:ListView(children:sorted.map((s){final p=ping[s.id];return ListTile(title:Text(s.name as String),subtitle:Text(p==null?'Проверка…':p<0?'Недоступен':'$p мс'),trailing:selected==s.id?const Icon(Icons.check,color:orange):null,onTap:()=>choose(s));}).toList())),
-  ])))));
+  ]))));
 }
 
 class AdminPage extends StatefulWidget{const AdminPage({super.key});@override State<AdminPage> createState()=>_AdminState();}
