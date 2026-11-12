@@ -41,7 +41,7 @@ jobs:
       - name: Build APK
         run: |
           cd build_src
-          flutter build apk --debug
+          flutter build apk --debug --target-platform android-arm64
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
