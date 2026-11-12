@@ -7,7 +7,7 @@ const fromB64u = (s) => Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/
 const sha = async (s) => b64u(await crypto.subtle.digest("SHA-256", encoder.encode(s)));
 async function passwordHash(password, salt = crypto.getRandomValues(new Uint8Array(16))) {
   const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({name:"PBKDF2",salt,iterations:210000,hash:"SHA-256"}, key, 256);
+  const bits = await crypto.subtle.deriveBits({name:"PBKDF2",salt,iterations:100000,hash:"SHA-256"}, key, 256);
   return saltToString(salt) + "." + b64u(bits);
 }
 function saltToString(salt) { return b64u(salt); }
