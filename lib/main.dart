@@ -271,7 +271,7 @@ class _HomeState extends SessionState<HomePage>{
         Text(countryFor(v.name),maxLines:1,overflow:TextOverflow.ellipsis,style:const TextStyle(fontWeight:FontWeight.bold)),
         const SizedBox(height:7),Text(v.name,maxLines:2,overflow:TextOverflow.ellipsis,style:const TextStyle(fontSize:12,color:Colors.white70)),
         const Spacer(),Row(children:[Expanded(child:Text(p==null?'—':p<0?'Timeout':'$p ms',style:const TextStyle(color:orange))),if(active)const Icon(Icons.check_circle,color:orange,size:18)]),
-      ]))));
+      ])));
     })),
   ])))));
 }
