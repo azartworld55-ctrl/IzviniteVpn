@@ -277,10 +277,10 @@ class _HomeState extends SessionState<HomePage>{
 }
 class AdminPage extends StatefulWidget{const AdminPage({super.key});@override State<AdminPage> createState()=>_AdminState();}
 class _AdminState extends SessionState<AdminPage>{
-  final search=TextEditingController();Map<String,dynamic> stats={};List<dynamic> users=[],events=[];bool busy=false;String? error;
+  final search=TextEditingController();Timer? searchTimer;Map<String,dynamic> stats={};List<dynamic> users=[],events=[];bool busy=false;String? error;
   @override void initState(){super.initState();startSessionWatch();load();}
-  @override void dispose(){search.dispose();super.dispose();}
-  Future<void> load()async{setState(()=>busy=true);try{final a=await Future.wait([api.call('GET','/admin/stats'),api.call('GET','/admin/users'+(search.text.isEmpty?'':'?q=${Uri.encodeQueryComponent(search.text)}')),api.call('GET','/admin/events')]);if(mounted)setState(() { stats=a[0]; users=a[1]['users']; events=a[2]['events']; });}catch(e){error=e.toString();}finally{if(mounted)setState(()=>busy=false);}}
+  @override void dispose(){searchTimer?.cancel();search.dispose();super.dispose();}
+  Future<void> load()async{setState(()=>busy=true);try{final a=await Future.wait([api.call('GET','/admin/stats'),api.call('GET','/admin/users'+(search.text.isEmpty?'':'?q=${Uri.encodeQueryComponent(search.text)}')),api.call('GET','/admin/events')]);if(mounted)setState(() { stats=a[0]; users=a[1]['users']; events=a[2]['events']; });}catch(e){if(mounted)setState(()=>error='Ошибка API администратора: $e');}finally{if(mounted)setState(()=>busy=false);}}
   Future<void> createUser()async{
     final name=TextEditingController(),keyInput=TextEditingController();int days=30,devices=1;
     final v=await showDialog<Map<String,dynamic>>(context:context,builder:(c)=>StatefulBuilder(builder:(c,refresh)=>AlertDialog(title:const Text('Новый пользователь'),content:Column(mainAxisSize:MainAxisSize.min,children:[
@@ -331,20 +331,32 @@ class _AdminState extends SessionState<AdminPage>{
     if(events.isEmpty||!await confirmAction('Очистить все уведомления?','История событий будет удалена без возможности восстановления.','Очистить'))return;
     try{await api.call('DELETE','/admin/events');await load();}catch(err){if(mounted)setState(()=>error=err.toString());}
   }
+  Widget userCard(dynamic u)=>AnimatedOpacity(duration:const Duration(milliseconds:250),opacity:1,child:Card(color:panel,child:ListTile(
+    title:Text(u['username']),
+    subtitle:Text('${u['status']=='blocked'?'Заблокирован':u['status']=='expired'?'Срок истёк':'Активен'} · Создан: ${u['createdAt']??'—'}\\nСрок: ${u['expiresAt']??'Без ограничения'} · ${u['deviceCount']}/${u['maxDevices']} устройств\\nКлюч: ${u['key']??'недоступен (старый формат)'}'),
+    isThreeLine:true,
+    trailing:PopupMenuButton<String>(onSelected:(v){if(v=='copy'&&u['key']!=null)Clipboard.setData(ClipboardData(text:u['key']));if(v=='key')setKey(u);if(v=='toggle')toggle(u);if(v=='revoke')revoke(u);},
+      itemBuilder:(_)=>[
+        if(u['key']!=null)const PopupMenuItem(value:'copy',child:Text('Скопировать ключ')),
+        const PopupMenuItem(value:'key',child:Text('Выдать новый ключ')),
+        PopupMenuItem(value:'toggle',child:Text(u['status']=='blocked'?'Разблокировать':'Заблокировать')),
+        const PopupMenuItem(value:'revoke',child:Text('Отозвать ключ')),
+      ]))));
   @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(title:const Text('Администрирование'),actions:[IconButton(tooltip:'Открыть VPN',onPressed:()=>Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const HomePage())),icon:const Icon(Icons.vpn_key,color:orange)),IconButton(onPressed:load,icon:const Icon(Icons.refresh))]),
     floatingActionButton:FloatingActionButton.extended(onPressed:createUser,backgroundColor:orange,foregroundColor:Colors.black,icon:const Icon(Icons.person_add),label:const Text('Создать ключ')),
     body:RefreshIndicator(onRefresh:load,color:orange,child:ListView(padding:const EdgeInsets.all(16),children:[
       Row(children:[Expanded(child:stat('Активные',stats['activeUsers']??'—')),const SizedBox(width:10),Expanded(child:stat('Выданные ключи',stats['issuedKeys']??'—'))]),
-      const SizedBox(height:16),TextField(controller:search,onSubmitted:(_)=>load(),decoration:InputDecoration(labelText:'Поиск по нику или ключу',suffixIcon:IconButton(onPressed:load,icon:const Icon(Icons.search)))),
+      const SizedBox(height:16),TextField(controller:search,onChanged:(_){searchTimer?.cancel();searchTimer=Timer(const Duration(milliseconds:350),load);},onSubmitted:(_){searchTimer?.cancel();load();},decoration:InputDecoration(labelText:'Поиск по нику или ключу',suffixIcon:IconButton(onPressed:(){searchTimer?.cancel();load();},icon:const Icon(Icons.search)))),
       const SizedBox(height:12),const Text('Пользователи',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18)),
-      ...users.map((u)=>Card(color:panel,child:ListTile(title:Text(u['username']),subtitle:Text('${u['status']=='blocked'?'Заблокирован':'Активен'} · Создан: ${u['createdAt']??'—'}\\nСрок: ${u['expiresAt']??'Без ограничения'} · ${u['deviceCount']}/${u['maxDevices']} устройств\\nКлюч: ${u['key']??'недоступен (старый формат)'}'),trailing:Row(mainAxisSize:MainAxisSize.min,children:[
-        if(u['key']!=null) IconButton(tooltip:'Скопировать ключ',onPressed:()=>Clipboard.setData(ClipboardData(text:u['key'])),icon:const Icon(Icons.copy,color:orange)) else IconButton(tooltip:'Задать новый ключ',onPressed:()=>setKey(u),icon:const Icon(Icons.edit,color:orange)),
-        IconButton(onPressed:()=>toggle(u),icon:Icon(u['status']=='blocked'?Icons.lock_open:Icons.block,color:orange)),
-        IconButton(onPressed:()=>revoke(u),icon:const Icon(Icons.key_off,color:Colors.redAccent)),
-      ])))),
+      if(users.any((u)=>u['status']=='active'))const Padding(padding:EdgeInsets.only(top:8,bottom:4),child:Text('Активные',style:TextStyle(fontWeight:FontWeight.bold,color:Colors.greenAccent))),
+      ...users.where((u)=>u['status']=='active').map(userCard),
+      if(users.any((u)=>u['status']=='blocked'))const Padding(padding:EdgeInsets.only(top:12,bottom:4),child:Text('Заблокированные',style:TextStyle(fontWeight:FontWeight.bold,color:Colors.orangeAccent))),
+      ...users.where((u)=>u['status']=='blocked').map(userCard),
+      if(users.any((u)=>u['status']=='expired'))const Padding(padding:EdgeInsets.only(top:12,bottom:4),child:Text('Срок истёк',style:TextStyle(fontWeight:FontWeight.bold,color:Colors.white60))),
+      ...users.where((u)=>u['status']=='expired').map(userCard),
       const SizedBox(height:16),Row(children:[const Expanded(child:Text('Уведомления',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18))),TextButton.icon(onPressed:events.isEmpty?null:clearEvents,icon:const Icon(Icons.delete_sweep),label:const Text('Очистить всё'))]),
       ...events.map((e)=>ListTile(dense:true,leading:const Icon(Icons.notifications_none,color:orange),title:Text(e['message']),subtitle:Text(e['createdAt']),trailing:IconButton(tooltip:'Удалить уведомление',onPressed:()=>deleteEvent(e),icon:const Icon(Icons.delete_outline,color:Colors.redAccent)))),
       if(busy)const Center(child:CircularProgressIndicator(color:orange)),if(error!=null)Text(error!,style:const TextStyle(color:Colors.redAccent)),const SizedBox(height:80),
     ])));
-  Widget stat(String t,dynamic v)=>Container(padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(18)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('$v',style:const TextStyle(color:orange,fontSize:25,fontWeight:FontWeight.bold)),Text(t)]));
+  Widget stat(String t,dynamic v)=>AnimatedContainer(duration:const Duration(milliseconds:300),padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:panel,borderRadius:BorderRadius.circular(18),border:Border.all(color:orange.withOpacity(.16))),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[AnimatedSwitcher(duration:const Duration(milliseconds:250),child:Text('$v',key:ValueKey('$v'),style:const TextStyle(color:orange,fontSize:25,fontWeight:FontWeight.bold))),Text(t)]));
 }
