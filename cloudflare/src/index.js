@@ -76,7 +76,12 @@ async function ensureAdmin(env) {
 }
 async function currentUser(request, env, requireAdmin=false, allowPasswordChange=false) {
   const raw=request.headers.get("authorization")||"";
-  const payload=await verify(raw.replace(/^Bearer\s+/i,""),env.JWT_SECRET);
+  let payload;
+  try {
+    payload=await verify(raw.replace(/^Bearer\s+/i,""),env.JWT_SECRET);
+  } catch {
+    throw new Response("Сессия недействительна или истекла",{status:401});
+  }
   const u=await env.DB.prepare("SELECT * FROM users WHERE id=?").bind(Number(payload.sub)).first();
   if(!u || !u.key_hash || userStatus(u)!=="active") throw new Response("Доступ отозван, заблокирован или истёк",{status:401});
   if(requireAdmin && u.role!=="admin") throw new Response("Недостаточно прав",{status:403});
