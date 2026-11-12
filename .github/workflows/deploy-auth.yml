@@ -14,32 +14,61 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+
       - name: Check deployment configuration
         env:
           ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          D1_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
           API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           ADMIN_KEY: ${{ secrets.ADMIN_BOOTSTRAP_KEY }}
           JWT: ${{ secrets.JWT_SECRET }}
         run: |
           test -n "$ACCOUNT_ID" || (echo "Missing repository variable CLOUDFLARE_ACCOUNT_ID"; exit 1)
-          test -n "$D1_ID" || (echo "Missing repository variable CLOUDFLARE_D1_DATABASE_ID"; exit 1)
           test -n "$API_TOKEN" || (echo "Missing secret CLOUDFLARE_API_TOKEN"; exit 1)
           test -n "$ADMIN_KEY" || (echo "Missing secret ADMIN_BOOTSTRAP_KEY"; exit 1)
+          test "${#ADMIN_KEY}" -ge 24 || (echo "ADMIN_BOOTSTRAP_KEY must be at least 24 characters"; exit 1)
           test -n "$JWT" || (echo "Missing secret JWT_SECRET"; exit 1)
           test "${#JWT}" -ge 32 || (echo "JWT_SECRET must be at least 32 characters"; exit 1)
+
       - name: Install Wrangler
         run: npm install --global wrangler
+
+      - name: Create or find D1 database
+        id: d1
+        env:
+          ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4/accounts/$ACCOUNT_ID/d1/database"
+          RESPONSE=$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "$API")
+          DB_ID=$(printf '%s' "$RESPONSE" | jq -r '.result[]? | select(.name=="izvinitevpn") | .uuid' | head -n 1)
+          if [ -z "$DB_ID" ]; then
+            RESPONSE=$(curl --fail-with-body --silent --show-error -X POST "$API" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data '{"name":"izvinitevpn"}')
+            DB_ID=$(printf '%s' "$RESPONSE" | jq -r '.result.uuid // empty')
+          fi
+          test -n "$DB_ID" || { echo "Could not create or locate D1 database"; exit 1; }
+          echo "database_id=$DB_ID" >> "$GITHUB_OUTPUT"
+          echo "D1 database is ready."
+
       - name: Configure D1 database ID
         env:
-          D1_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
-        run: sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$D1_ID/" cloudflare/wrangler.toml
+          D1_ID: ${{ steps.d1.outputs.database_id }}
+        run: |
+          test -n "$D1_ID"
+          sed -i "s/REPLACE_WITH_D1_DATABASE_ID/$D1_ID/" cloudflare/wrangler.toml
+
       - name: Apply D1 schema
         working-directory: cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: wrangler d1 execute izvinitevpn --remote --file=schema.sql
+
       - name: Set Worker secrets
         working-directory: cloudflare
         env:
@@ -50,12 +79,11 @@ jobs:
         run: |
           printf '%s' "$ADMIN_BOOTSTRAP_KEY" | wrangler secret put ADMIN_BOOTSTRAP_KEY --name izvinitevpn-auth
           printf '%s' "$JWT_SECRET" | wrangler secret put JWT_SECRET --name izvinitevpn-auth
+          printf '%s' 'Aqsone' | wrangler secret put ADMIN_USERNAME --name izvinitevpn-auth
+
       - name: Deploy Worker
         working-directory: cloudflare
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          ADMIN_USERNAME: Aqsone
-        run: |
-          printf '%s' "$ADMIN_USERNAME" | wrangler secret put ADMIN_USERNAME --name izvinitevpn-auth
-          wrangler deploy
+        run: wrangler deploy
