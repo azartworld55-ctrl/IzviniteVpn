@@ -195,7 +195,7 @@ class _HomeState extends SessionState<HomePage>{
   @override void initState(){super.initState();startSessionWatch();
     statusSub=SingBox.instance.watchConnectionStatus().listen((v){if(mounted)setState(()=>connectionStatus=v);});
     stateSub=SingBox.instance.watchConnectionState().listen((v){if(mounted&&v.error!=null)setState(()=>error='Ошибка VPN: ${v.error}');});
-    statsSub=SingBox.instance.watchConnectionStats().listen((s){if(mounted)setState(()=>{down=rate(s.downloadSpeed),up=rate(s.uploadSpeed)});});
+    statsSub=SingBox.instance.watchConnectionStats().listen((s){if(mounted)setState((){down=rate(s.downloadSpeed);up=rate(s.uploadSpeed);});});
     loadRole();loadServers();
   }
   Future<void> loadRole()async{try{final d=await api.call('GET','/auth/me');if(mounted)setState(()=>isAdmin=d['user']['role']=='admin');}catch(_){if(mounted)setState(()=>error='Сервер авторизации недоступен.');}}
@@ -204,12 +204,12 @@ class _HomeState extends SessionState<HomePage>{
     if(mounted)setState(()=>loadingServers=true);
     try{final r=await http.get(Uri.parse(subUrl)).timeout(const Duration(seconds:25));if(r.statusCode!=200)throw Exception('HTTP ${r.statusCode}');
       await SingBox.instance.importServerConfigs(r.body,subscriptionId:'black-lte');final a=await SingBox.instance.getServerConfigs();
-      if(a.isEmpty)throw Exception('Нет поддерживаемых серверов');if(mounted)setState(()=>{servers=a,selected=selected??a.first.id,error=null});
+      if(a.isEmpty)throw Exception('Нет поддерживаемых серверов');if(mounted)setState((){servers=a;selected=selected??a.first.id;error=null;});
     }catch(e){if(mounted)setState(()=>error='Ошибка подписки: $e');}finally{if(mounted)setState(()=>loadingServers=false);}
   }
   void testPings(){if(servers.isEmpty||checkingPings)return;pinger?.cancel();ping.clear();setState(()=>checkingPings=true);
     pinger=SingBox.instance.pingServers(servers,concurrency:8).listen((r){if(mounted)setState(()=>ping[r.serverId??'']=r.success?r.ping:-1);},
-      onError:(e){if(mounted)setState(()=>{error='Ошибка проверки МС: $e',checkingPings=false});},
+      onError:(e){if(mounted)setState((){error='Ошибка проверки МС: $e';checkingPings=false;});},
       onDone:(){if(mounted)setState(()=>checkingPings=false);});
   }
   List<SingBoxServerConfig> get sorted{final a=[...servers];if(sortBestFirst)a.sort((x,y)=>(ping[x.id]??999999).compareTo(ping[y.id]??999999));return a;}
@@ -218,10 +218,9 @@ class _HomeState extends SessionState<HomePage>{
     for(final e in m.entries){if(n.contains(e.key))return e.value;}return '🌐 $name';
   }
   void announceCountry(String name){final v=countryFor(name);setState(()=>activeCountry=v);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Активная страна: $v'),duration:const Duration(seconds:3)));}
-  Future<void> loadServers()async{
   Future<void> connect({bool auto=false})async{
     if(busy||servers.isEmpty)return;if(!await ensureSession()){setState(()=>error='Сервер авторизации недоступен.');return;}
-    setState(()=>{busy=true,error=null});
+    setState((){busy=true;error=null;});
     try{if(!connected)await SingBox.instance.connectToServers(servers);
       if(auto){await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,SingBoxConfigBuilder.autoTag);final a=await SingBox.instance.getActiveServerConfig();if(a!=null){setState(()=>selected=a.id);announceCountry(a.name);}}
       else{final s=servers.firstWhere((x)=>x.id==selected,orElse:()=>servers.first);await SingBox.instance.selectOutbound(SingBoxConfigBuilder.proxyTag,s.name);setState(()=>selected=s.id);announceCountry(s.name);}
