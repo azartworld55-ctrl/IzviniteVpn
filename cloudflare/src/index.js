@@ -126,7 +126,7 @@ async function handle(request,env) {
   try {u=await currentUser(request,env,path.startsWith("/api/admin/"));} catch(e) {if(e instanceof Response)return json({error:await e.text()},e.status);throw e;}
   if(method==="GET" && path==="/api/auth/me") return json({user:userView(u)});
   if(method==="GET" && path==="/api/admin/stats") {
-    const a=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND status='active' AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)").first();
+    const a=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND key_hash<>'' AND status='active' AND (expires_at IS NULL OR datetime(expires_at)>CURRENT_TIMESTAMP)").first();
     const b=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND key_hash<>'' AND status='blocked'").first();
     const k=await env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role='user' AND key_hash<>''").first();
     return json({activeUsers:a.n,blockedUsers:b.n,issuedKeys:k.n});
