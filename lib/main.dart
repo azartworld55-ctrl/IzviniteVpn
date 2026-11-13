@@ -396,9 +396,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
       if (api.token != null) {
         try {
           final me = await api.call('GET', '/auth/me');
-          await SingBox.instance.disconnect();
-          await SingBox.instance.waitForStatus(SingBoxConnectionStatus.disconnected)
-              .timeout(const Duration(seconds: 6));
+          await stopTemporaryVpn();
           if (!mounted) return;
           Navigator.pushAndRemoveUntil(context, MaterialPageRoute(
             builder: (_) => me['user']?['role'] == 'admin'
@@ -518,6 +516,13 @@ class _BootstrapPageState extends State<BootstrapPage> {
   );
 }
 
+Future<void> stopTemporaryVpn() async {
+  if (SingBox.instance.status == SingBoxConnectionStatus.disconnected) return;
+  await SingBox.instance.disconnect();
+  await SingBox.instance.waitForStatus(SingBoxConnectionStatus.disconnected)
+      .timeout(const Duration(seconds: 6));
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SingBox.instance.initialize(const SingBoxOptions(android:SingBoxAndroidOptions(
@@ -596,9 +601,7 @@ class _LoginState extends State<LoginPage> {
       await p.setString('session_token',api.token!);
       if(!mounted)return;
       final u=d['user'];
-      await SingBox.instance.disconnect();
-      await SingBox.instance.waitForStatus(SingBoxConnectionStatus.disconnected)
-          .timeout(const Duration(seconds: 6));
+      await stopTemporaryVpn();
       if (!mounted) return;
       if (d['mustChangePassword'] == true) {
         Navigator.pushReplacement(context, MaterialPageRoute(
@@ -736,7 +739,7 @@ class _HomeState extends SessionState<HomePage> {
   SingBoxConnectionStatus vpnStatus = SingBox.instance.status;
 
   bool get connected => vpnStatus == SingBoxConnectionStatus.connected;
-  bool get busy => connecting || loadingSubscription;
+  bool get busy => connecting || loadingSubscription || checkingServers;
 
   // Mirror sing_box.connectToServers() tag generation so duplicate display
   // names still map back to their stable profile IDs.
@@ -991,7 +994,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> toggleConnection({bool auto = false}) async {
-    if (connecting) return;
+    if (connecting || checkingServers) return;
     if (connected || vpnStatus == SingBoxConnectionStatus.connecting) {
       await disconnectVpn();
       return;
@@ -1029,7 +1032,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> chooseServer(SingBoxServerConfig server) async {
-    if (connecting) return;
+    if (connecting || checkingServers) return;
     HapticFeedback.selectionClick();
     setState(() { selected = server.id; if (connected) connecting = true; vpnError = null; });
     try {
