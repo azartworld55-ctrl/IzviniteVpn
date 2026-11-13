@@ -427,7 +427,6 @@ class _HomeState extends SessionState<HomePage> {
       if (mounted) setState(() {
         servers = loaded;
         ping.clear();
-        pingCompleted = 0;
         if (selected == null || !servers.any((server) => server.id == selected)) {
           selected = servers.first.id;
         }
