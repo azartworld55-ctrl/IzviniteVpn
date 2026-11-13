@@ -179,15 +179,11 @@ class _BootstrapServerCheck {
   const _BootstrapServerCheck({
     required this.serverId,
     this.pingMs,
-    this.downloadMbps,
-    this.uploadMbps,
     this.exitIp,
     this.error,
   });
   final String serverId;
   final int? pingMs;
-  final double? downloadMbps;
-  final double? uploadMbps;
   final String? exitIp;
   final String? error;
   bool get working => error == null && pingMs != null && exitIp != null;
@@ -422,10 +418,6 @@ class _BootstrapPageState extends State<BootstrapPage> {
             Text(title, style: TextStyle(color: result == null ? Colors.white60 :
               result.working ? Colors.lightGreenAccent : Colors.redAccent)),
             if (result?.pingMs != null) Text('Задержка: ' + result!.pingMs.toString() + ' мс'),
-            if (result?.downloadMbps != null)
-              Text('Загрузка: ' + result!.downloadMbps!.toStringAsFixed(1) + ' Мбит/с'),
-            if (result?.uploadMbps != null)
-              Text('Отдача: ' + result!.uploadMbps!.toStringAsFixed(1) + ' Мбит/с'),
             if (result?.exitIp != null) Text('Внешний IP: ' + result!.exitIp!),
             if (result?.error != null) Text(result!.error!,
               style: const TextStyle(color: Colors.redAccent)),
