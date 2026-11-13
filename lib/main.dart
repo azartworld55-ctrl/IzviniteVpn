@@ -43,8 +43,8 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
       if (usable.isEmpty) throw Exception('В подписке нет поддерживаемых профилей');
       if (cachedBody == null || body.length >= cachedBody.length * 0.5) {
         final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('subscription_cache_$subscriptionId', body);
-        await prefs.setString('subscription_cache_time_$subscriptionId',
+        await prefs.setString('subscription_cache_black_lte', body);
+        await prefs.setString('subscription_cache_time_black_lte',
           DateTime.now().toUtc().toIso8601String());
       }
       return SubscriptionLoadResult(imported, false);
@@ -155,7 +155,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
         subscriptionId: 'black-lte',
         downloadedBody: response?.body,
         contentType: response?.headers['content-type'],
-        cachedBody: prefs.getString('subscription_cache_black-lte'),
+        cachedBody: prefs.getString('subscription_cache_black_lte'),
       );
       final eligible = loaded.servers.where((server) =>
         server.enabled && server.outbound != null &&
