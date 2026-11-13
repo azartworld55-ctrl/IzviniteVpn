@@ -61,15 +61,26 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
           body.toLowerCase().startsWith('<html')) {
         throw Exception('Источник подписки вернул пустой или некорректный ответ');
       }
-      if (cachedBody != null && cachedBody.isNotEmpty &&
-          body.length < cachedBody.length * 0.5) {
-        throw Exception('Новый ответ заметно короче сохранённой подписки; оставляем кэш');
+      int? cachedServerCount;
+      if (cachedBody != null && cachedBody.trim().isNotEmpty) {
+        try {
+          final previous = await SingBox.instance.importServerConfigs(
+            cachedBody.trim(), subscriptionId: subscriptionId);
+          cachedServerCount = previous.where((server) =>
+            server.enabled && server.outbound != null).length;
+        } catch (_) {
+          // An unreadable old cache must not block a valid fresh subscription.
+        }
       }
       final imported = await SingBox.instance.importServerConfigs(
         body, subscriptionId: subscriptionId);
       final usable = imported.where((server) =>
         server.enabled && server.outbound != null).toList();
       if (usable.isEmpty) throw Exception('В подписке нет поддерживаемых профилей');
+      if (cachedServerCount != null && cachedServerCount > 0 &&
+          usable.length < cachedServerCount * 0.5) {
+        throw Exception('В новой подписке серверов меньше половины от кэша; сохраняем предыдущую версию');
+      }
       await secureStorage.write(key: 'subscription_cache_black_lte', value: body);
       final prefs = await SharedPreferences.getInstance();
       final updatedAt = DateTime.now().toUtc().toIso8601String();
