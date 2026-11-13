@@ -796,7 +796,15 @@ class _HomeState extends SessionState<HomePage> {
         contentType: response?.headers['content-type'],
         cachedBody: await readSubscriptionCache(),
       );
-      final loaded = loadedResult.servers;
+      // The BLACK LTE list is the single source for the entire VPN app.
+      // Keep only usable non-Russian profiles on the main screen as well as
+      // in the pre-authentication health check.
+      final loaded = loadedResult.servers.where((server) =>
+        server.enabled && server.outbound != null &&
+        !isRussianBootstrapServer(server.name)).toList();
+      if (loaded.isEmpty) {
+        throw Exception('В BLACK LTE нет доступных серверов вне РФ');
+      }
       if (mounted) setState(() {
         // The BLACK_LTE feed is the source for every VPN screen. Keep only
         // supported non-Russian nodes consistently, not just during bootstrap.
