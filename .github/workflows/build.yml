@@ -54,7 +54,7 @@ jobs:
           API_BASE_URL: ${{ vars.API_BASE_URL }}
         run: |
           cd build_src
-          flutter build apk --debug --target-platform android-arm64 --dart-define=API_BASE_URL="$API_BASE_URL"
+          flutter build apk --debug --target-platform android-arm64,android-x64 --dart-define=API_BASE_URL="$API_BASE_URL"
       - uses: actions/upload-artifact@v4
         with:
           name: apk-debug
@@ -63,6 +63,21 @@ jobs:
           retention-days: 14
       - name: Validate Worker JavaScript
         run: node --check cloudflare/src/index.js
+      - name: Smoke-test deployed API
+        if: ${{ vars.API_BASE_URL != '' }}
+        env:
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: |
+          set -euo pipefail
+          BASE="${API_BASE_URL%/}"
+          HEALTH=$(curl --fail --silent --show-error --max-time 20 "$BASE/health")
+          echo "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const x=JSON.parse(s);if(x.ok!==true)process.exit(1);console.log("Worker health: OK")})'
+          STATUS=$(curl --silent --show-error --output /tmp/auth-response.json --write-out '%{http_code}' --max-time 20 "$BASE/api/auth/me")
+          test "$STATUS" = "401" || { echo "Expected unauthenticated API request to return 401, got $STATUS"; cat /tmp/auth-response.json; exit 1; }
+          echo "Protected API route rejects unauthenticated requests: OK"
+      - name: Require API configuration for functional smoke tests
+        run: |
+          test -n "${{ vars.API_BASE_URL }}" || { echo "API_BASE_URL is required to run API smoke tests"; exit 1; }
       - name: Build release APK
         if: ${{ vars.API_BASE_URL != '' }}
         env:
