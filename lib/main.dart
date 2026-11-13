@@ -179,11 +179,15 @@ class _BootstrapServerCheck {
   const _BootstrapServerCheck({
     required this.serverId,
     this.pingMs,
+    this.downloadMbps,
+    this.uploadMbps,
     this.exitIp,
     this.error,
   });
   final String serverId;
   final int? pingMs;
+  final double? downloadMbps;
+  final double? uploadMbps;
   final String? exitIp;
   final String? error;
   bool get working => error == null && pingMs != null && exitIp != null;
