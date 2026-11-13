@@ -71,6 +71,7 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
         server.enabled && server.outbound != null).toList();
       if (usable.isEmpty) throw Exception('В подписке нет поддерживаемых профилей');
       await secureStorage.write(key: 'subscription_cache_black_lte', value: body);
+      final prefs = await SharedPreferences.getInstance();
       final updatedAt = DateTime.now().toUtc().toIso8601String();
       await prefs.setString('subscription_cache_time_black_lte', updatedAt);
       return SubscriptionLoadResult(imported, false, updatedAt);
@@ -620,12 +621,11 @@ class _HomeState extends SessionState<HomePage> {
           on http.ClientException { }
         if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
-      final prefs = await SharedPreferences.getInstance();
       final loadedResult = await loadSubscriptionWithCache(
         subscriptionId: 'black-lte',
         downloadedBody: response?.body,
         contentType: response?.headers['content-type'],
-        cachedBody: prefs.getString('subscription_cache_black_lte'),
+        cachedBody: await readSubscriptionCache(),
       );
       final loaded = loadedResult.servers;
       if (mounted) setState(() {
