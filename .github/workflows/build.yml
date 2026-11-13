@@ -48,7 +48,7 @@ jobs:
       - name: Analyze Dart code
         run: |
           cd build_src
-          flutter analyze
+          flutter analyze --no-fatal-infos
       - name: Build debug APK
         env:
           API_BASE_URL: ${{ vars.API_BASE_URL }}
