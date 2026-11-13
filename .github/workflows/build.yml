@@ -4,7 +4,7 @@ name: Build IzviniteVpn APK
 on:
   workflow_dispatch:
   pull_request:
-    branches: [ main ]
+    branches: [ main, feat/preauth-bootstrap-login ]
   push:
     branches: [ main, master, feature/izvinitevpn-v2, feature/vpn-ui-admin-complete, fix/vpn-connectivity-diagnostics, feat/preauth-bootstrap-login, feat/vpn-health-speed ]
 
