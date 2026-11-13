@@ -36,17 +36,19 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
           body.toLowerCase().startsWith('<html')) {
         throw Exception('Источник подписки вернул пустой или некорректный ответ');
       }
+      if (cachedBody != null && cachedBody.isNotEmpty &&
+          body.length < cachedBody.length * 0.5) {
+        throw Exception('Новый ответ заметно короче сохранённой подписки; оставляем кэш');
+      }
       final imported = await SingBox.instance.importServerConfigs(
         body, subscriptionId: subscriptionId);
       final usable = imported.where((server) =>
         server.enabled && server.outbound != null).toList();
       if (usable.isEmpty) throw Exception('В подписке нет поддерживаемых профилей');
-      if (cachedBody == null || body.length >= cachedBody.length * 0.5) {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('subscription_cache_black_lte', body);
-        await prefs.setString('subscription_cache_time_black_lte',
-          DateTime.now().toUtc().toIso8601String());
-      }
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('subscription_cache_black_lte', body);
+      await prefs.setString('subscription_cache_time_black_lte',
+        DateTime.now().toUtc().toIso8601String());
       return SubscriptionLoadResult(imported, false);
     } catch (e) {
       freshError = e;
@@ -137,7 +139,6 @@ class _BootstrapPageState extends State<BootstrapPage> {
     if (mounted) setState(() { loading = true; error = null; });
     try {
       http.Response? response;
-      Object? requestError;
       for (var attempt = 0; attempt < 3; attempt++) {
         try {
           final candidate = await http.get(Uri.parse(subUrl), headers: const {
@@ -145,9 +146,8 @@ class _BootstrapPageState extends State<BootstrapPage> {
             'User-Agent': 'IzviniteVpn/1.1',
           }).timeout(const Duration(seconds: 25));
           if (candidate.statusCode == 200) { response = candidate; break; }
-          requestError = Exception('HTTP ${candidate.statusCode}');
         } on TimeoutException catch (e) { requestError = e; }
-          on http.ClientException catch (e) { requestError = e; }
+          on http.ClientException { }
         if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
       final prefs = await SharedPreferences.getInstance();
