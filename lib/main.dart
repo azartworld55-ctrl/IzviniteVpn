@@ -125,10 +125,16 @@ class _BootstrapPageState extends State<BootstrapPage> {
         throw Exception('Источник стартовой подписки вернул некорректный ответ');
       }
 
-      await SingBox.instance.importServerConfigs(body, subscriptionId: 'black-lte');
-      final loaded = await SingBox.instance.getServerConfigs();
-      final eligible = loaded.where((server) =>
-        server.enabled && server.outbound != null &&
+      // Use only profiles returned by this import. getServerConfigs() returns
+      // the entire local store and could accidentally include stale profiles
+      // from another subscription in the pre-auth bootstrap list.
+      final imported = await SingBox.instance.importServerConfigs(
+        body,
+        subscriptionId: 'black-lte',
+      );
+      final eligible = imported.where((server) =>
+        server.enabled &&
+        server.outbound != null &&
         !isRussianBootstrapServer(server.name)).take(3).toList();
       if (eligible.isEmpty) {
         throw Exception('В стартовой подписке не найдены доступные серверы вне РФ');
