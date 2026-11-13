@@ -92,3 +92,27 @@ jobs:
           path: build_src/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+  smoke-android:
+    name: Android emulator smoke test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-debug
+          path: artifacts
+      - name: Install and launch app in Android Emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_2
+          script: |
+            set -euo pipefail
+            adb install artifacts/app-debug.apk
+            adb shell monkey -p ru.yusupov.izvinitevpn 1
+            sleep 12
+            adb shell pidof ru.yusupov.izvinitevpn
+            adb shell dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | grep -q 'ru.yusupov.izvinitevpn'
