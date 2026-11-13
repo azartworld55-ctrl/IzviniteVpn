@@ -16,7 +16,8 @@ final api = Api();
 class SubscriptionLoadResult {
   final List<SingBoxServerConfig> servers;
   final bool fromCache;
-  const SubscriptionLoadResult(this.servers, this.fromCache);
+  final String? updatedAt;
+  const SubscriptionLoadResult(this.servers, this.fromCache, this.updatedAt);
 }
 
 Future<SubscriptionLoadResult> loadSubscriptionWithCache({
@@ -47,9 +48,9 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
       if (usable.isEmpty) throw Exception('В подписке нет поддерживаемых профилей');
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('subscription_cache_black_lte', body);
-      await prefs.setString('subscription_cache_time_black_lte',
-        DateTime.now().toUtc().toIso8601String());
-      return SubscriptionLoadResult(imported, false);
+      final updatedAt = DateTime.now().toUtc().toIso8601String();
+      await prefs.setString('subscription_cache_time_black_lte', updatedAt);
+      return SubscriptionLoadResult(imported, false, updatedAt);
     } catch (e) {
       freshError = e;
     }
@@ -59,7 +60,11 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
       cachedBody.trim(), subscriptionId: subscriptionId);
     final usable = imported.where((server) =>
       server.enabled && server.outbound != null).toList();
-    if (usable.isNotEmpty) return SubscriptionLoadResult(imported, true);
+    if (usable.isNotEmpty) {
+      final prefs = await SharedPreferences.getInstance();
+      return SubscriptionLoadResult(imported, true,
+        prefs.getString('subscription_cache_time_black_lte'));
+    }
   }
   throw Exception('Не удалось загрузить подписку из сети или кэша: ${freshError ?? 'нет ответа'}');
 }
@@ -146,8 +151,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
             'User-Agent': 'IzviniteVpn/1.1',
           }).timeout(const Duration(seconds: 25));
           if (candidate.statusCode == 200) { response = candidate; break; }
-        } on TimeoutException { }
-          on http.ClientException { }
+        } on TimeoutException { } on http.ClientException { }
         if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
       final prefs = await SharedPreferences.getInstance();
@@ -164,7 +168,10 @@ class _BootstrapPageState extends State<BootstrapPage> {
       if (mounted) setState(() {
         servers = eligible;
         selected = eligible.first.id;
-        error = loaded.fromCache ? 'Показана сохранённая подписка; она может быть устаревшей.' : null;
+        final cachedAt = DateTime.tryParse(loaded.updatedAt ?? '')?.toLocal();
+        error = loaded.fromCache
+          ? 'Показана сохранённая подписка; обновлена: ${cachedAt?.toString() ?? 'дата неизвестна'}.'
+          : null;
       });
     } catch (e) {
       if (mounted) setState(() => error = 'Не удалось загрузить стартовые серверы: $e');
@@ -576,7 +583,6 @@ class _HomeState extends SessionState<HomePage> {
     if (mounted) setState(() { loadingSubscription = true; error = null; });
     try {
       http.Response? response;
-      Object? requestError;
       for (var attempt = 0; attempt < 3; attempt++) {
         try {
           final candidate = await http.get(Uri.parse(subUrl), headers: const {
@@ -601,7 +607,10 @@ class _HomeState extends SessionState<HomePage> {
         if (selected == null || !servers.any((server) => server.id == selected)) {
           selected = servers.first.id;
         }
-        error = loadedResult.fromCache ? 'Показана сохранённая подписка; она может быть устаревшей.' : null;
+        final cachedAt = DateTime.tryParse(loadedResult.updatedAt ?? '')?.toLocal();
+        error = loadedResult.fromCache
+          ? 'Показана сохранённая подписка; обновлена: ${cachedAt?.toString() ?? 'дата неизвестна'}.'
+          : null;
       });
     } catch (e) {
       if (mounted) setState(() => error = 'Не удалось обновить подписку: ' + e.toString());
