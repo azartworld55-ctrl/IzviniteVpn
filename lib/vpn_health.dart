@@ -26,7 +26,7 @@ Future<String?> fetchExternalIp() async {
     try {
       final response = await http
           .get(Uri.parse(endpoint))
-          .timeout(const Duration(seconds: 6));
+          .timeout(const Duration(seconds: 3));
       final value = response.body.trim();
       if (response.statusCode == 200 &&
           InternetAddress.tryParse(value) != null) {
@@ -163,17 +163,10 @@ class VpnHealthController extends ChangeNotifier {
   }
 
   Future<int?> _ping() async {
-    // Measure an actual HTTPS round trip through the active VPN route,
-    // matching the URL-test style latency shown by v2rayNG more closely
-    // than a core-side ICMP/TCP probe.
-    final watch = Stopwatch()..start();
     try {
-      final response = await http.get(
-        Uri.parse('https://cp.cloudflare.com/generate_204'),
-      ).timeout(const Duration(seconds: 4));
-      watch.stop();
-      if (response.statusCode != 204 && response.statusCode != 200) return null;
-      return watch.elapsedMilliseconds;
+      final result = await _singBox.pingCurrentServer()
+          .timeout(const Duration(seconds: 6));
+      return result.success ? result.ping.round() : null;
     } catch (_) {
       return null;
     }
