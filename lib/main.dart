@@ -374,7 +374,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> loadServers({VoidCallback? onProgress}) async {
-    if (loadingSubscription) return;
+    if (loadingSubscription || checkingPing || connecting) return;
     if (mounted) setState(() { loadingSubscription = true; error = null; });
     onProgress?.call();
     try {
@@ -761,7 +761,7 @@ class _HomeState extends SessionState<HomePage> {
               },
                 icon: const Icon(Icons.speed, size: 18),
                 label: Text(checkingPing ? 'Проверка…' : 'Проверить серверы')),
-              TextButton.icon(onPressed: loadingSubscription ? null : () {
+              TextButton.icon(onPressed: loadingSubscription || checkingPing || connecting ? null : () {
                 loadServers(onProgress: () {
                   if (sheetContext.mounted) refreshSheet(() {});
                 });
@@ -795,6 +795,10 @@ class _HomeState extends SessionState<HomePage> {
           if (loadingSubscription) const Padding(
             padding: EdgeInsets.symmetric(horizontal: 14, vertical: 4),
             child: LinearProgressIndicator(color: orange),
+          ),
+          if (error != null) Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+            child: Text(error!, style: const TextStyle(color: Colors.redAccent, fontSize: 11)),
           ),
           Expanded(child: GridView.builder(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 18),
