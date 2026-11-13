@@ -132,10 +132,12 @@ class _BootstrapPageState extends State<BootstrapPage> {
         body,
         subscriptionId: 'black-lte',
       );
+      // Keep a broader manual-choice list. A valid imported profile is not
+      // proof that its remote endpoint is reachable or usable.
       final eligible = imported.where((server) =>
         server.enabled &&
         server.outbound != null &&
-        !isRussianBootstrapServer(server.name)).take(3).toList();
+        !isRussianBootstrapServer(server.name)).take(20).toList();
       if (eligible.isEmpty) {
         throw Exception('В стартовой подписке не найдены доступные серверы вне РФ');
       }
@@ -196,7 +198,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
         textAlign: TextAlign.center,
         style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
       const SizedBox(height: 8),
-      const Text('Для первой авторизации доступны до трёх стартовых серверов вне РФ. После входа они больше не отображаются.',
+      const Text('Для первой авторизации показаны профили из стартовой подписки вне РФ. Выберите профиль вручную. Приложение не проверяет их работоспособность автоматически. После входа этот список больше не отображается.',
         textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
       const SizedBox(height: 20),
       if (loading) const Center(child: CircularProgressIndicator(color: orange)),
@@ -210,7 +212,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
           groupValue: selected,
           onChanged: connecting ? null : (value) => setState(() => selected = value),
           title: Text(server.name),
-          subtitle: const Text('Стартовый сервер'),
+          subtitle: const Text('Профиль из подписки; доступность не проверена'),
           activeColor: orange,
         ),
       )),
