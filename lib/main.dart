@@ -208,14 +208,18 @@ class _BootstrapProbe {
 }
 
 Future<_BootstrapProbe> _probeBootstrapTunnel() async {
+  // This is the same kind of HTTP URL-test used by proxy clients: measure
+  // the round trip to a tiny 204 endpoint through the active VPN tunnel.
   final watch = Stopwatch()..start();
-  final response = await http.get(Uri.parse('https://api.ipify.org'))
-      .timeout(const Duration(seconds: 4));
+  final response = await http.get(
+    Uri.parse('https://cp.cloudflare.com/generate_204'),
+  ).timeout(const Duration(seconds: 4));
   watch.stop();
-  final ip = response.body.trim();
-  if (response.statusCode != 200 || InternetAddress.tryParse(ip) == null) {
+  if (response.statusCode != 204 && response.statusCode != 200) {
     throw Exception('Нет ответа через VPN-туннель');
   }
+  final ip = await _fetchBootstrapIp();
+  if (ip == null) throw Exception('Не удалось проверить внешний IP через VPN');
   return _BootstrapProbe(watch.elapsedMilliseconds, ip);
 }
 
