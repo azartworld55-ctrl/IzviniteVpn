@@ -75,6 +75,11 @@ class VpnHealthController extends ChangeNotifier {
   int _generation = 0;
   bool _started = false;
   bool _capturingBaseline = false;
+  bool _disposed = false;
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
 
   bool get isConnected =>
       _singBox.status == SingBoxConnectionStatus.connected;
@@ -83,14 +88,17 @@ class VpnHealthController extends ChangeNotifier {
     if (_started) return;
     _started = true;
 
-    _statusSub = _singBox.watchConnectionStatus().listen(_onStatus);
+    _statusSub = _singBox.watchConnectionStatus().listen((status) {
+      if (!_disposed) _onStatus(status);
+    });
     _stateSub = _singBox.watchConnectionState().listen((state) {
-      if (state.error == null) return;
+      if (_disposed || state.error == null) return;
       errorText = state.error.toString();
       health = VpnHealth.error;
-      notifyListeners();
+      _notify();
     });
     _statsSub = _singBox.watchConnectionStats().listen((stats) {
+      if (_disposed) return;
       if (!isConnected) {
         liveDownloadMbps = 0;
         liveUploadMbps = 0;
@@ -98,7 +106,7 @@ class VpnHealthController extends ChangeNotifier {
         liveDownloadMbps = stats.downloadSpeed * 8 / 1000000;
         liveUploadMbps = stats.uploadSpeed * 8 / 1000000;
       }
-      notifyListeners();
+      _notify();
     });
 
     if (_singBox.status == SingBoxConnectionStatus.disconnected) {
@@ -133,7 +141,7 @@ class VpnHealthController extends ChangeNotifier {
         (_) => _pingOnly(),
       );
     }
-    notifyListeners();
+    _notify();
   }
 
   Future<void> _captureRealIp() async {
@@ -147,7 +155,7 @@ class VpnHealthController extends ChangeNotifier {
       }
     } finally {
       _capturingBaseline = false;
-      notifyListeners();
+      _notify();
     }
   }
 
@@ -171,7 +179,7 @@ class VpnHealthController extends ChangeNotifier {
     } else if (health == VpnHealth.noTraffic) {
       health = VpnHealth.working;
     }
-    notifyListeners();
+    _notify();
   }
 
   Future<void> verify() async {
@@ -179,7 +187,7 @@ class VpnHealthController extends ChangeNotifier {
     final generation = ++_generation;
     health = VpnHealth.checking;
     errorText = null;
-    notifyListeners();
+    _notify();
 
     final pingFuture = _ping();
     final ipFuture = fetchExternalIp();
@@ -199,17 +207,18 @@ class VpnHealthController extends ChangeNotifier {
     } else {
       health = VpnHealth.working;
     }
-    notifyListeners();
+    _notify();
   }
 
   Future<void> runSpeedTest() async {
     if (!isConnected || speedRunning) return;
     speedRunning = true;
     speedError = null;
-    notifyListeners();
+    _notify();
 
     try {
       final result = await _singBox.testSpeed();
+      if (_disposed) return;
       lastSpeed = VpnSpeedResult(
         downloadMbps: result.downloadMbps,
         uploadMbps: result.uploadMbps,
@@ -219,12 +228,14 @@ class VpnHealthController extends ChangeNotifier {
       speedError = error.toString();
     } finally {
       speedRunning = false;
-      notifyListeners();
+      _notify();
     }
   }
 
   @override
   void dispose() {
+    _disposed = true;
+    _generation++;
     _recheckTimer?.cancel();
     _statusSub?.cancel();
     _statsSub?.cancel();
