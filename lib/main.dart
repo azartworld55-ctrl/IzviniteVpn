@@ -174,12 +174,34 @@ class BootstrapPage extends StatefulWidget {
   @override State<BootstrapPage> createState() => _BootstrapPageState();
 }
 
+class _BootstrapServerCheck {
+  const _BootstrapServerCheck({
+    required this.serverId,
+    this.pingMs,
+    this.downloadMbps,
+    this.uploadMbps,
+    this.exitIp,
+    this.error,
+  });
+  final String serverId;
+  final int? pingMs;
+  final double? downloadMbps;
+  final double? uploadMbps;
+  final String? exitIp;
+  final String? error;
+  bool get working => error == null && pingMs != null;
+}
+
 class _BootstrapPageState extends State<BootstrapPage> {
   List<SingBoxServerConfig> servers = [];
+  final Map<String, _BootstrapServerCheck> checks = {};
   String? selected;
   String? error;
   bool loading = true;
+  bool scanning = false;
   bool connecting = false;
+  int checkedCount = 0;
+  String scanMessage = 'Загружаем список серверов…';
 
   @override void initState() {
     super.initState();
@@ -187,7 +209,10 @@ class _BootstrapPageState extends State<BootstrapPage> {
   }
 
   Future<void> loadBootstrapServers() async {
-    if (mounted) setState(() { loading = true; error = null; });
+    if (mounted) setState(() {
+      loading = true; scanning = false; checkedCount = 0;
+      checks.clear(); error = null; scanMessage = 'Загружаем список серверов…';
+    });
     try {
       http.Response? response;
       for (var attempt = 0; attempt < 3; attempt++) {
@@ -208,33 +233,85 @@ class _BootstrapPageState extends State<BootstrapPage> {
       );
       final eligible = loaded.servers.where((server) =>
         server.enabled && server.outbound != null &&
-        !isRussianBootstrapServer(server.name)).take(20).toList();
-      if (eligible.isEmpty) throw Exception('В стартовой подписке не найдены доступные серверы вне РФ');
+        !isRussianBootstrapServer(server.name)).take(3).toList();
+      if (eligible.isEmpty) throw Exception('В стартовой подписке не найдены серверы вне РФ');
       if (mounted) setState(() {
-        servers = eligible;
-        selected = eligible.first.id;
+        servers = eligible; selected = eligible.first.id;
+        loading = false; scanning = true;
+        scanMessage = 'Подготавливаем проверку ' + eligible.length.toString() + ' серверов…';
         final cachedAt = DateTime.tryParse(loaded.updatedAt ?? '')?.toLocal();
         error = loaded.fromCache
-          ? 'Показана сохранённая подписка; обновлена: ${cachedAt?.toString() ?? 'дата неизвестна'}.'
+          ? 'Используется сохранённая подписка; обновлена: ' + (cachedAt?.toString() ?? 'дата неизвестна') + '.'
           : null;
       });
+      await checkBootstrapServers(eligible);
     } catch (e) {
-      if (mounted) setState(() => error = 'Не удалось загрузить стартовые серверы: $e');
-    } finally {
-      if (mounted) setState(() => loading = false);
+      if (mounted) setState(() {
+        error = 'Не удалось загрузить стартовые серверы: ' + e.toString();
+        loading = false; scanning = false;
+      });
     }
   }
 
+  Future<void> checkBootstrapServers(List<SingBoxServerConfig> candidates) async {
+    final box = SingBox.instance;
+    for (var index = 0; index < candidates.length; index++) {
+      final server = candidates[index];
+      if (!mounted) return;
+      setState(() {
+        scanMessage = 'Проверяем сервер ' + (index + 1).toString() + ' из ' +
+          candidates.length.toString() + ': ' + server.name;
+      });
+      _BootstrapServerCheck result;
+      try {
+        // Speed tests require a temporary tunnel through the candidate server.
+        await box.connectToServers([server], selectedId: server.id);
+        await box.waitForStatus(SingBoxConnectionStatus.connected);
+        final pingResult = await box.pingCurrentServer();
+        final speedResult = await box.testSpeed();
+        final ip = await fetchExternalIp();
+        result = _BootstrapServerCheck(
+          serverId: server.id,
+          pingMs: pingResult.success ? pingResult.ping.round() : null,
+          downloadMbps: speedResult.downloadMbps,
+          uploadMbps: speedResult.uploadMbps,
+          exitIp: ip,
+          error: pingResult.success ? null : 'Подключение есть, но проверка задержки не прошла',
+        );
+      } catch (e) {
+        result = _BootstrapServerCheck(
+          serverId: server.id,
+          error: e.toString().replaceFirst('Exception: ', ''),
+        );
+      } finally {
+        try {
+          if (box.status != SingBoxConnectionStatus.disconnected) await box.disconnect();
+        } catch (_) { }
+      }
+      if (!mounted) return;
+      setState(() {
+        checks[server.id] = result;
+        checkedCount = index + 1;
+      });
+    }
+    if (mounted) setState(() {
+      scanning = false;
+      scanMessage = 'Проверка завершена';
+    });
+  }
+
   Future<void> connectAndContinue() async {
-    if (connecting || servers.isEmpty) return;
+    if (connecting || scanning || servers.isEmpty || selected == null) return;
+    final selectedCheck = checks[selected!];
+    if (selectedCheck == null || !selectedCheck.working) {
+      setState(() => error = 'Выберите сервер, который прошёл проверку.');
+      return;
+    }
     setState(() { connecting = true; error = null; });
     try {
-      await SingBox.instance.connectToServers(
-        servers,
-        selectedId: selected ?? servers.first.id,
-      );
+      final server = servers.firstWhere((item) => item.id == selected);
+      await SingBox.instance.connectToServers([server], selectedId: server.id);
       await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
-
       if (api.token != null) {
         try {
           final me = await api.call('GET', '/auth/me');
@@ -251,53 +328,106 @@ class _BootstrapPageState extends State<BootstrapPage> {
           api.token = null;
         }
       }
-
       if (!mounted) return;
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
     } catch (e) {
-      if (mounted) setState(() => error = 'Не удалось продолжить через выбранное подключение: $e');
+      if (mounted) setState(() => error = 'Не удалось подключиться к выбранному серверу: ' + e.toString());
     } finally {
       if (mounted) setState(() => connecting = false);
     }
   }
 
+  Widget _serverCard(SingBoxServerConfig server) {
+    final result = checks[server.id];
+    final isSelected = selected == server.id;
+    final title = result == null ? 'Ожидает проверки' :
+      result.error != null ? 'Не прошёл проверку' : 'Работает';
+    return Card(
+      color: panel,
+      child: RadioListTile<String>(
+        value: server.id,
+        groupValue: selected,
+        onChanged: scanning || connecting || result?.working != true
+          ? null : (value) => setState(() { selected = value; error = null; }),
+        activeColor: orange,
+        title: Text(server.name, style: const TextStyle(fontWeight: FontWeight.w700)),
+        subtitle: Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: TextStyle(color: result == null ? Colors.white60 :
+              result.working ? Colors.lightGreenAccent : Colors.redAccent)),
+            if (result?.pingMs != null) Text('Задержка: ' + result!.pingMs.toString() + ' мс'),
+            if (result?.downloadMbps != null)
+              Text('Загрузка: ' + result!.downloadMbps!.toStringAsFixed(1) + ' Мбит/с'),
+            if (result?.uploadMbps != null)
+              Text('Отдача: ' + result!.uploadMbps!.toStringAsFixed(1) + ' Мбит/с'),
+            if (result?.exitIp != null) Text('Внешний IP: ' + result!.exitIp!),
+            if (result?.error != null) Text(result!.error!,
+              style: const TextStyle(color: Colors.redAccent)),
+            if (isSelected && result?.working == true)
+              const Text('Выбран', style: TextStyle(color: orange)),
+          ]),
+        ),
+      ),
+    );
+  }
+
   @override Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Первоначальное подключение')),
+    appBar: AppBar(title: const Text('Проверка VPN перед входом')),
     body: ListView(padding: const EdgeInsets.all(22), children: [
       const Icon(Icons.shield_outlined, color: orange, size: 64),
       const SizedBox(height: 14),
-      const Text('Подключитесь для входа',
+      const Text('Выберите проверенный VPN',
         textAlign: TextAlign.center,
         style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
       const SizedBox(height: 8),
-      const Text('Для первой авторизации показаны профили из стартовой подписки вне РФ. Выберите профиль вручную. Приложение не проверяет их работоспособность автоматически. После входа этот список больше не отображается.',
+      const Text('Сначала приложение проверит три сервера вне РФ: подключение, задержку и реальную скорость. После проверки выберите подходящий сервер и перейдите к авторизации.',
         textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
       const SizedBox(height: 20),
-      if (loading) const Center(child: CircularProgressIndicator(color: orange)),
+      if (loading) ...[
+        const Center(child: CircularProgressIndicator(color: orange)),
+        const SizedBox(height: 10),
+        const Text('Загружаем список из трёх серверов…', textAlign: TextAlign.center),
+      ],
+      if (scanning) ...[
+        Row(children: [
+          const SizedBox(width: 20, height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2, color: orange)),
+          const SizedBox(width: 12),
+          Expanded(child: Text(scanMessage)),
+        ]),
+        const SizedBox(height: 10),
+        LinearProgressIndicator(
+          value: servers.isEmpty ? null : checkedCount / servers.length,
+          color: orange, backgroundColor: Colors.white12,
+        ),
+        const SizedBox(height: 6),
+        Text('Проверено ' + checkedCount.toString() + ' из ' + servers.length.toString(),
+          textAlign: TextAlign.end,
+          style: const TextStyle(color: Colors.white54, fontSize: 12)),
+      ],
       if (!loading && servers.isEmpty)
         FilledButton.tonal(onPressed: loadBootstrapServers,
           child: const Text('Повторить загрузку серверов')),
-      ...servers.map((server) => Card(
-        color: panel,
-        child: RadioListTile<String>(
-          value: server.id,
-          groupValue: selected,
-          onChanged: connecting ? null : (value) => setState(() => selected = value),
-          title: Text(server.name),
-          subtitle: const Text('Профиль из подписки; доступность не проверена'),
-          activeColor: orange,
+      ...servers.map(_serverCard),
+      if (!scanning && servers.isNotEmpty && checks.values.every((item) => !item.working))
+        const Padding(
+          padding: EdgeInsets.only(top: 8),
+          child: Text('Ни один сервер не прошёл проверку. Попробуйте обновить список позже.',
+            style: TextStyle(color: Colors.redAccent)),
         ),
-      )),
       if (error != null) Padding(
         padding: const EdgeInsets.only(top: 12),
         child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
       ),
       const SizedBox(height: 18),
       FilledButton(
-        onPressed: loading || connecting || servers.isEmpty || apiUrl.isEmpty
+        onPressed: loading || scanning || connecting || selected == null ||
+            checks[selected]?.working != true || apiUrl.isEmpty
           ? null : connectAndContinue,
         style: FilledButton.styleFrom(backgroundColor: orange, foregroundColor: Colors.black),
-        child: Text(connecting ? 'Подключение…' : 'Подключиться и продолжить'),
+        child: Text(connecting ? 'Подключение…' :
+          scanning ? 'Идёт проверка серверов…' : 'Подключиться и продолжить'),
       ),
       if (apiUrl.isEmpty) const Padding(
         padding: EdgeInsets.only(top: 12),
