@@ -34,7 +34,7 @@ jobs:
         run: |
           flutter create --platforms=android --org ru.yusupov --project-name izvinitevpn build_src
           cp pubspec.yaml build_src/pubspec.yaml
-          rm -rf build_src/lib
+          rm -rf build_src/lib build_src/test
           cp -R lib build_src/lib
           sed -i 's/android:label="build_src"/android:label="IzviniteVpn"/' build_src/android/app/src/main/AndroidManifest.xml
           sed -i 's/<application/<application android:allowBackup="false"/' build_src/android/app/src/main/AndroidManifest.xml
