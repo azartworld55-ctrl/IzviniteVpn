@@ -13,6 +13,55 @@ const orange = Color(0xFFFF7A1A);
 const panel = Color(0xFF1B1B1B);
 final api = Api();
 
+class SubscriptionLoadResult {
+  final List<SingBoxServerConfig> servers;
+  final bool fromCache;
+  const SubscriptionLoadResult(this.servers, this.fromCache);
+}
+
+Future<SubscriptionLoadResult> loadSubscriptionWithCache({
+  required String subscriptionId,
+  required String? downloadedBody,
+  required String? contentType,
+  required String? cachedBody,
+}) async {
+  Object? freshError;
+  if (downloadedBody != null) {
+    final body = downloadedBody.trim();
+    final type = (contentType ?? '').toLowerCase();
+    try {
+      if (body.isEmpty || body.length > 2 * 1024 * 1024 ||
+          type.contains('text/html') ||
+          body.toLowerCase().startsWith('<!doctype html') ||
+          body.toLowerCase().startsWith('<html')) {
+        throw Exception('Источник подписки вернул пустой или некорректный ответ');
+      }
+      final imported = await SingBox.instance.importServerConfigs(
+        body, subscriptionId: subscriptionId);
+      final usable = imported.where((server) =>
+        server.enabled && server.outbound != null).toList();
+      if (usable.isEmpty) throw Exception('В подписке нет поддерживаемых профилей');
+      if (cachedBody == null || body.length >= cachedBody.length * 0.5) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('subscription_cache_$subscriptionId', body);
+        await prefs.setString('subscription_cache_time_$subscriptionId',
+          DateTime.now().toUtc().toIso8601String());
+      }
+      return SubscriptionLoadResult(imported, false);
+    } catch (e) {
+      freshError = e;
+    }
+  }
+  if (cachedBody != null && cachedBody.trim().isNotEmpty) {
+    final imported = await SingBox.instance.importServerConfigs(
+      cachedBody.trim(), subscriptionId: subscriptionId);
+    final usable = imported.where((server) =>
+      server.enabled && server.outbound != null).toList();
+    if (usable.isNotEmpty) return SubscriptionLoadResult(imported, true);
+  }
+  throw Exception('Не удалось загрузить подписку из сети или кэша: ${freshError ?? 'нет ответа'}');
+}
+
 class ApiUnavailableException implements Exception {
   final String message;
   const ApiUnavailableException(this.message);
@@ -91,68 +140,31 @@ class _BootstrapPageState extends State<BootstrapPage> {
       Object? requestError;
       for (var attempt = 0; attempt < 3; attempt++) {
         try {
-          final candidate = await http.get(
-            Uri.parse(subUrl),
-            headers: const {
-              'Accept': 'text/plain, */*',
-              'Cache-Control': 'no-cache',
-              'User-Agent': 'IzviniteVpn/1.1',
-            },
-          ).timeout(const Duration(seconds: 25));
-          if (candidate.statusCode == 200) {
-            response = candidate;
-            break;
-          }
+          final candidate = await http.get(Uri.parse(subUrl), headers: const {
+            'Accept': 'text/plain, */*', 'Cache-Control': 'no-cache',
+            'User-Agent': 'IzviniteVpn/1.1',
+          }).timeout(const Duration(seconds: 25));
+          if (candidate.statusCode == 200) { response = candidate; break; }
           requestError = Exception('HTTP ${candidate.statusCode}');
-        } on TimeoutException catch (e) {
-          requestError = e;
-        } on http.ClientException catch (e) {
-          requestError = e;
-        }
-        if (attempt < 2) {
-          await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
-        }
+        } on TimeoutException catch (e) { requestError = e; }
+          on http.ClientException catch (e) { requestError = e; }
+        if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
       final prefs = await SharedPreferences.getInstance();
-      final String body;
-      if (response == null) {
-        final cached = prefs.getString('subscription_cache_black_lte');
-        if (cached == null || cached.trim().isEmpty) {
-          throw Exception('Не удалось получить стартовую подписку после 3 попыток и локальный кэш отсутствует: ${requestError ?? 'нет ответа'}');
-        }
-        body = cached.trim();
-      } else {
-        body = response.body.trim();
-      }
-      final contentType = (response.headers['content-type'] ?? '').toLowerCase();
-      if (body.isEmpty || body.length > 2 * 1024 * 1024 ||
-          contentType.contains('text/html') ||
-          body.toLowerCase().startsWith('<!doctype html') ||
-          body.toLowerCase().startsWith('<html')) {
-        throw Exception('Источник стартовой подписки вернул некорректный ответ');
-      }
-
-      // Use only profiles returned by this import. getServerConfigs() returns
-      // the entire local store and could accidentally include stale profiles
-      // from another subscription in the pre-auth bootstrap list.
-      final imported = await SingBox.instance.importServerConfigs(
-        body,
+      final loaded = await loadSubscriptionWithCache(
         subscriptionId: 'black-lte',
+        downloadedBody: response?.body,
+        contentType: response?.headers['content-type'],
+        cachedBody: prefs.getString('subscription_cache_black-lte'),
       );
-      // Keep a broader manual-choice list. A valid imported profile is not
-      // proof that its remote endpoint is reachable or usable.
-      final eligible = imported.where((server) =>
-        server.enabled &&
-        server.outbound != null &&
+      final eligible = loaded.servers.where((server) =>
+        server.enabled && server.outbound != null &&
         !isRussianBootstrapServer(server.name)).take(20).toList();
-      if (eligible.isEmpty) {
-        throw Exception('В стартовой подписке не найдены доступные серверы вне РФ');
-      }
-      await prefs.setString('subscription_cache_black_lte', body);
+      if (eligible.isEmpty) throw Exception('В стартовой подписке не найдены доступные серверы вне РФ');
       if (mounted) setState(() {
         servers = eligible;
         selected = eligible.first.id;
-        error = null;
+        error = loaded.fromCache ? 'Показана сохранённая подписка; она может быть устаревшей.' : null;
       });
     } catch (e) {
       if (mounted) setState(() => error = 'Не удалось загрузить стартовые серверы: $e');
@@ -567,65 +579,30 @@ class _HomeState extends SessionState<HomePage> {
       Object? requestError;
       for (var attempt = 0; attempt < 3; attempt++) {
         try {
-          final candidate = await http.get(
-            Uri.parse(subUrl),
-            headers: const {
-              'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
-              'Cache-Control': 'no-cache',
-              'User-Agent': 'IzviniteVpn/1.1',
-            },
-          ).timeout(const Duration(seconds: 25));
-          if (candidate.statusCode == 200) {
-            response = candidate;
-            break;
-          }
-          if (candidate.statusCode == 429 || candidate.statusCode >= 500) {
-            requestError = Exception('HTTP ${candidate.statusCode}');
-          } else {
-            throw Exception('HTTP ${candidate.statusCode}');
-          }
-        } on TimeoutException catch (e) {
-          requestError = e;
-        } on http.ClientException catch (e) {
-          requestError = e;
-        }
-        if (attempt < 2) {
-          await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
-        }
+          final candidate = await http.get(Uri.parse(subUrl), headers: const {
+            'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
+            'Cache-Control': 'no-cache', 'User-Agent': 'IzviniteVpn/1.1',
+          }).timeout(const Duration(seconds: 25));
+          if (candidate.statusCode == 200) { response = candidate; break; }
+          requestError = Exception('HTTP ${candidate.statusCode}');
+        } on TimeoutException catch (e) { requestError = e; }
+          on http.ClientException catch (e) { requestError = e; }
+        if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
-
       final prefs = await SharedPreferences.getInstance();
-      final String body;
-      if (response == null) {
-        final cached = prefs.getString('subscription_cache_black_lte');
-        if (cached == null || cached.trim().isEmpty) {
-          throw Exception('Не удалось получить подписку после 3 попыток и локальный кэш отсутствует: ${requestError ?? 'нет ответа'}');
-        }
-        body = cached.trim();
-      } else {
-        body = response.body.trim();
-      }
-      final contentType = (response.headers['content-type'] ?? '').toLowerCase();
-      if (body.isEmpty) throw Exception('Сервер подписки вернул пустой ответ');
-      if (body.length > 2 * 1024 * 1024) throw Exception('Размер подписки превышает 2 МБ');
-      if (contentType.contains('text/html') ||
-          body.toLowerCase().startsWith('<!doctype html') ||
-          body.toLowerCase().startsWith('<html')) {
-        throw Exception('Вместо подписки получена HTML-страница. Проверьте источник.');
-      }
-
-      await SingBox.instance.importServerConfigs(body, subscriptionId: 'black-lte');
-      final loaded = await SingBox.instance.getServerConfigs();
-      if (loaded.isEmpty) {
-        throw Exception('Подписка загружена, но поддерживаемые серверы не найдены');
-      }
-      await prefs.setString('subscription_cache_black_lte', body);
+      final loadedResult = await loadSubscriptionWithCache(
+        subscriptionId: 'black-lte',
+        downloadedBody: response?.body,
+        contentType: response?.headers['content-type'],
+        cachedBody: prefs.getString('subscription_cache_black-lte'),
+      );
+      final loaded = loadedResult.servers;
       if (mounted) setState(() {
         servers = loaded;
         if (selected == null || !servers.any((server) => server.id == selected)) {
           selected = servers.first.id;
         }
-        error = null;
+        error = loadedResult.fromCache ? 'Показана сохранённая подписка; она может быть устаревшей.' : null;
       });
     } catch (e) {
       if (mounted) setState(() => error = 'Не удалось обновить подписку: ' + e.toString());
