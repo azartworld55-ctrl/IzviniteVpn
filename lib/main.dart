@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sing_box/sing_box.dart';
 
 const apiUrl = String.fromEnvironment('API_BASE_URL');
@@ -12,6 +13,29 @@ const subUrl = 'https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK
 const orange = Color(0xFFFF7A1A);
 const panel = Color(0xFF1B1B1B);
 final api = Api();
+const secureStorage = FlutterSecureStorage();
+
+Future<String?> readSubscriptionCache() async {
+  final secure = await secureStorage.read(key: 'subscription_cache_black_lte');
+  if (secure != null && secure.isNotEmpty) return secure;
+  // One-time migration from the legacy plaintext SharedPreferences key.
+  final prefs = await SharedPreferences.getInstance();
+  final legacy = prefs.getString('subscription_cache_black_lte');
+  if (legacy != null && legacy.isNotEmpty) {
+    await secureStorage.write(key: 'subscription_cache_black_lte', value: legacy);
+    await prefs.remove('subscription_cache_black_lte');
+  }
+  return legacy;
+}
+
+Future<void> clearSubscriptionCache() async {
+  await secureStorage.delete(key: 'subscription_cache_black_lte');
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove('subscription_cache_black_lte');
+  await prefs.remove('subscription_cache_time_black_lte');
+}
+
+
 
 class SubscriptionLoadResult {
   final List<SingBoxServerConfig> servers;
@@ -46,8 +70,7 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
       final usable = imported.where((server) =>
         server.enabled && server.outbound != null).toList();
       if (usable.isEmpty) throw Exception('В подписке нет поддерживаемых профилей');
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('subscription_cache_black_lte', body);
+      await secureStorage.write(key: 'subscription_cache_black_lte', value: body);
       final updatedAt = DateTime.now().toUtc().toIso8601String();
       await prefs.setString('subscription_cache_time_black_lte', updatedAt);
       return SubscriptionLoadResult(imported, false, updatedAt);
@@ -159,7 +182,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
         subscriptionId: 'black-lte',
         downloadedBody: response?.body,
         contentType: response?.headers['content-type'],
-        cachedBody: prefs.getString('subscription_cache_black_lte'),
+        cachedBody: await readSubscriptionCache(),
       );
       final eligible = loaded.servers.where((server) =>
         server.enabled && server.outbound != null &&
@@ -203,6 +226,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
         } catch (_) {
           final p = await SharedPreferences.getInstance();
           await p.remove('session_token');
+          await clearSubscriptionCache();
           api.token = null;
         }
       }
@@ -303,6 +327,7 @@ class _SessionGateState extends State<SessionGate> {
         return;
       } catch (_) {
         await p.remove('session_token');
+        await clearSubscriptionCache();
         api.token = null;
       }
     }
@@ -417,6 +442,7 @@ abstract class SessionState<T extends StatefulWidget> extends State<T> with Widg
       try { await SingBox.instance.disconnect(); } catch (_) {}
       final p = await SharedPreferences.getInstance();
       await p.remove('session_token');
+      await clearSubscriptionCache();
       api.token = null;
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
