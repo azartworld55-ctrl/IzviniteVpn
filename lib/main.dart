@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sing_box/sing_box.dart';
+import 'vpn_health.dart';
 
 const apiUrl = String.fromEnvironment('API_BASE_URL');
 const subUrl = 'https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_LTE.txt';
@@ -505,6 +506,7 @@ class _HomeState extends SessionState<HomePage> {
   String? error, vpnError, coreDiagnostic, selected, activeServer;
   bool loadingSubscription = false, connecting = false;
   bool isAdmin = false, disconnectingNow = false;
+  late final VpnHealthController healthController;
   SingBoxConnectionStatus vpnStatus = SingBox.instance.status;
 
   bool get connected => vpnStatus == SingBoxConnectionStatus.connected;
@@ -532,6 +534,7 @@ class _HomeState extends SessionState<HomePage> {
   @override void initState() {
     super.initState();
     startSessionWatch();
+    healthController = VpnHealthController()..start();
     statusSub = SingBox.instance.watchConnectionStatus().listen((status) {
       if (!mounted) return;
       setState(() {
@@ -742,6 +745,7 @@ class _HomeState extends SessionState<HomePage> {
     stateSub?.cancel();
     groupsSub?.cancel();
     logSub?.cancel();
+    healthController.dispose();
     super.dispose();
   }
 
@@ -861,6 +865,7 @@ class _HomeState extends SessionState<HomePage> {
           Text(country ?? '', style: const TextStyle(color: Colors.white54)),
         ]),
         _infoCard('Трафик', [_metric('Загрузка', down), _metric('Отдача', up)]),
+        VpnHealthCard(controller: healthController),
         if (loadingSubscription) const Padding(padding: EdgeInsets.all(12),
           child: Center(child: CircularProgressIndicator(color: orange))),
         if (error != null) Padding(padding: const EdgeInsets.only(top: 12),
