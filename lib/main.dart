@@ -191,7 +191,7 @@ class _BootstrapServerCheck {
   final int? pingMs;
   final String? exitIp;
   final String? error;
-  bool get working => error == null && pingMs != null && exitIp != null;
+  bool get working => error == null && pingMs != null;
 }
 
 Future<String?> _fetchBootstrapIp() async {
@@ -200,7 +200,7 @@ Future<String?> _fetchBootstrapIp() async {
     'https://icanhazip.com',
     'https://ifconfig.me/ip',
   ];
-  for (final endpoint in endpoints) {
+  final results = await Future.wait(endpoints.map((endpoint) async {
     try {
       final response = await http.get(Uri.parse(endpoint))
           .timeout(const Duration(seconds: 2));
@@ -209,8 +209,12 @@ Future<String?> _fetchBootstrapIp() async {
         return ip;
       }
     } catch (_) {
-      // External-IP lookup is supplementary and does not invalidate URL-test.
+      // An independent lookup may fail while the tunnel itself works.
     }
+    return null;
+  }));
+  for (final ip in results) {
+    if (ip != null) return ip;
   }
   return null;
 }
@@ -326,9 +330,8 @@ class _BootstrapPageState extends State<BootstrapPage> {
         await box.waitForStatus(SingBoxConnectionStatus.connected)
             .timeout(const Duration(seconds: 7));
 
-        // One small HTTPS request through the active system tunnel. Its
-        // elapsed time is the connectivity latency; no large speed test runs
-        // during bootstrap discovery.
+        // sing-box performs its own URL-test; no Dart HTTP request or large
+        // download test is run for each candidate.
         final probe = await _probeBootstrapTunnel();
         result = _BootstrapServerCheck(
           serverId: server.id,
