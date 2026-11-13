@@ -234,7 +234,9 @@ class _BootstrapPageState extends State<BootstrapPage> {
       final eligible = loaded.servers.where((server) =>
         server.enabled && server.outbound != null &&
         !isRussianBootstrapServer(server.name)).take(3).toList();
-      if (eligible.isEmpty) throw Exception('В стартовой подписке не найдены серверы вне РФ');
+      if (eligible.length < 3) {
+        throw Exception('Для проверки нужны три сервера вне РФ, сейчас найдено: ' + eligible.length.toString());
+      }
       if (mounted) setState(() {
         servers = eligible; selected = eligible.first.id;
         loading = false; scanning = true;
@@ -255,6 +257,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
 
   Future<void> checkBootstrapServers(List<SingBoxServerConfig> candidates) async {
     final box = SingBox.instance;
+    final baselineIp = await fetchExternalIp();
     for (var index = 0; index < candidates.length; index++) {
       final server = candidates[index];
       if (!mounted) return;
@@ -276,7 +279,11 @@ class _BootstrapPageState extends State<BootstrapPage> {
           downloadMbps: speedResult.downloadMbps,
           uploadMbps: speedResult.uploadMbps,
           exitIp: ip,
-          error: pingResult.success ? null : 'Подключение есть, но проверка задержки не прошла',
+          error: !pingResult.success
+            ? 'Подключение есть, но проверка задержки не прошла'
+            : (baselineIp != null && ip != null && baselineIp == ip)
+              ? 'Внешний IP не изменился — маршрут через VPN не подтверждён'
+              : null,
         );
       } catch (e) {
         result = _BootstrapServerCheck(
