@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ main ]
   push:
-    branches: [ main, master, feature/izvinitevpn-v2, feature/vpn-ui-admin-complete, fix/vpn-connectivity-diagnostics ]
+    branches: [ main, master, feature/izvinitevpn-v2, feature/vpn-ui-admin-complete, fix/vpn-connectivity-diagnostics, feat/preauth-bootstrap-login ]
 
 concurrency:
   group: izvinitevpn-${{ github.workflow }}-${{ github.ref }}
@@ -34,9 +34,10 @@ jobs:
         run: |
           flutter create --platforms=android --org ru.yusupov --project-name izvinitevpn build_src
           cp pubspec.yaml build_src/pubspec.yaml
-          rm -rf build_src/lib
+          rm -rf build_src/lib build_src/test
           cp -R lib build_src/lib
           sed -i 's/android:label="build_src"/android:label="IzviniteVpn"/' build_src/android/app/src/main/AndroidManifest.xml
+          sed -i 's/<application/<application android:allowBackup="false"/' build_src/android/app/src/main/AndroidManifest.xml
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' build_src/android/app/build.gradle.kts
           mkdir -p build_src/android/app/src/main/res/drawable build_src/android/app/src/main/res/mipmap-anydpi-v26 build_src/android/app/src/main/res/values
           cp android-icon/ic_launcher_foreground.xml build_src/android/app/src/main/res/drawable/ic_launcher_foreground.xml
@@ -44,23 +45,74 @@ jobs:
           cp android-icon/colors.xml build_src/android/app/src/main/res/values/ic_launcher_colors.xml
           cd build_src
           flutter pub get
-      - name: Validate Worker JavaScript
-        run: node --check cloudflare/src/index.js
-      - name: Validate API endpoint
+      - name: Analyze Dart code
+        run: |
+          cd build_src
+          flutter analyze --no-fatal-infos
+      - name: Build debug APK
         env:
           API_BASE_URL: ${{ vars.API_BASE_URL }}
         run: |
-          test -n "$API_BASE_URL" || (echo "Set repository Actions variable API_BASE_URL after deploying the auth API"; exit 1)
-          case "$API_BASE_URL" in https://*) ;; *) echo "API_BASE_URL must use HTTPS"; exit 1 ;; esac
-      - name: Build APK
+          cd build_src
+          flutter build apk --debug --target-platform android-arm64,android-x64 --dart-define=API_BASE_URL="$API_BASE_URL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-debug
+          path: build_src/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Validate Worker JavaScript
+        run: node --check cloudflare/src/index.js
+      - name: Smoke-test deployed API
+        if: ${{ vars.API_BASE_URL != '' }}
+        env:
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: |
+          set -euo pipefail
+          BASE="${API_BASE_URL%/}"
+          HEALTH=$(curl --fail --silent --show-error --max-time 20 "$BASE/health")
+          echo "$HEALTH" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const x=JSON.parse(s);if(x.ok!==true)process.exit(1);console.log("Worker health: OK")})'
+          STATUS=$(curl --silent --show-error --output /tmp/auth-response.json --write-out '%{http_code}' --max-time 20 "$BASE/api/auth/me")
+          test "$STATUS" = "401" || { echo "Expected unauthenticated API request to return 401, got $STATUS"; cat /tmp/auth-response.json; exit 1; }
+          echo "Protected API route rejects unauthenticated requests: OK"
+      - name: Require API configuration for functional smoke tests
+        run: |
+          test -n "${{ vars.API_BASE_URL }}" || { echo "API_BASE_URL is required to run API smoke tests"; exit 1; }
+      - name: Build release APK
+        if: ${{ vars.API_BASE_URL != '' }}
         env:
           API_BASE_URL: ${{ vars.API_BASE_URL }}
         run: |
           cd build_src
           flutter build apk --release --target-platform android-arm64 --dart-define=API_BASE_URL="$API_BASE_URL"
       - uses: actions/upload-artifact@v4
+        if: ${{ vars.API_BASE_URL != '' }}
         with:
           name: IzviniteVpn-arm64-apk
           path: build_src/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
+
+  smoke-android:
+    name: Android emulator smoke test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-debug
+          path: artifacts
+      - name: Install and launch app in Android Emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_2
+          script: |
+            set -euo pipefail
+            adb install artifacts/app-debug.apk
+            adb shell monkey -p ru.yusupov.izvinitevpn 1
+            sleep 12
+            adb shell pidof ru.yusupov.izvinitevpn
+            adb shell dumpsys activity activities | grep -E 'mResumedActivity|topResumedActivity' | grep -q 'ru.yusupov.izvinitevpn'

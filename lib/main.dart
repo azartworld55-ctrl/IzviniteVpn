@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:sing_box/sing_box.dart';
 
 const apiUrl = String.fromEnvironment('API_BASE_URL');
@@ -12,6 +13,106 @@ const subUrl = 'https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK
 const orange = Color(0xFFFF7A1A);
 const panel = Color(0xFF1B1B1B);
 final api = Api();
+const secureStorage = FlutterSecureStorage();
+
+Future<String?> readSubscriptionCache() async {
+  try {
+    final secure = await secureStorage.read(key: 'subscription_cache_black_lte');
+    if (secure != null && secure.isNotEmpty) return secure;
+  } catch (_) {
+    // A lost/unavailable Keystore key must not prevent the legacy cache fallback.
+  }
+  final prefs = await SharedPreferences.getInstance();
+  final legacy = prefs.getString('subscription_cache_black_lte');
+  if (legacy != null && legacy.isNotEmpty) {
+    try {
+      await secureStorage.write(key: 'subscription_cache_black_lte', value: legacy);
+      final verified = await secureStorage.read(key: 'subscription_cache_black_lte');
+      if (verified == legacy) {
+        await prefs.remove('subscription_cache_black_lte');
+      }
+    } catch (_) {
+      // Keep the legacy copy unless the encrypted write was read back successfully.
+    }
+  }
+  return legacy;
+}
+
+Future<void> clearSubscriptionCache() async {
+  await secureStorage.delete(key: 'subscription_cache_black_lte');
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.remove('subscription_cache_black_lte');
+  await prefs.remove('subscription_cache_time_black_lte');
+}
+
+
+
+class SubscriptionLoadResult {
+  final List<SingBoxServerConfig> servers;
+  final bool fromCache;
+  final String? updatedAt;
+  const SubscriptionLoadResult(this.servers, this.fromCache, this.updatedAt);
+}
+
+Future<SubscriptionLoadResult> loadSubscriptionWithCache({
+  required String subscriptionId,
+  required String? downloadedBody,
+  required String? contentType,
+  required String? cachedBody,
+}) async {
+  Object? freshError;
+  if (downloadedBody != null) {
+    final body = downloadedBody.trim();
+    final type = (contentType ?? '').toLowerCase();
+    try {
+      if (body.isEmpty || body.length > 2 * 1024 * 1024 ||
+          type.contains('text/html') ||
+          body.toLowerCase().startsWith('<!doctype html') ||
+          body.toLowerCase().startsWith('<html')) {
+        throw Exception('Источник подписки вернул пустой или некорректный ответ');
+      }
+      int? cachedServerCount;
+      if (cachedBody != null && cachedBody.trim().isNotEmpty) {
+        try {
+          final previous = await SingBox.instance.importServerConfigs(
+            cachedBody.trim(), subscriptionId: subscriptionId);
+          cachedServerCount = previous.where((server) =>
+            server.enabled && server.outbound != null).length;
+        } catch (_) {
+          // An unreadable old cache must not block a valid fresh subscription.
+        }
+      }
+      final imported = await SingBox.instance.importServerConfigs(
+        body, subscriptionId: subscriptionId);
+      final usable = imported.where((server) =>
+        server.enabled && server.outbound != null).toList();
+      if (usable.isEmpty) throw Exception('В подписке нет поддерживаемых профилей');
+      if (cachedServerCount != null && cachedServerCount > 0 &&
+          usable.length < cachedServerCount * 0.5) {
+        throw Exception('В новой подписке серверов меньше половины от кэша; сохраняем предыдущую версию');
+      }
+      await secureStorage.write(key: 'subscription_cache_black_lte', value: body);
+      final prefs = await SharedPreferences.getInstance();
+      final updatedAt = DateTime.now().toUtc().toIso8601String();
+      await prefs.setString('subscription_cache_time_black_lte', updatedAt);
+      return SubscriptionLoadResult(imported, false, updatedAt);
+    } catch (e) {
+      freshError = e;
+    }
+  }
+  if (cachedBody != null && cachedBody.trim().isNotEmpty) {
+    final imported = await SingBox.instance.importServerConfigs(
+      cachedBody.trim(), subscriptionId: subscriptionId);
+    final usable = imported.where((server) =>
+      server.enabled && server.outbound != null).toList();
+    if (usable.isNotEmpty) {
+      final prefs = await SharedPreferences.getInstance();
+      return SubscriptionLoadResult(imported, true,
+        prefs.getString('subscription_cache_time_black_lte'));
+    }
+  }
+  throw Exception('Не удалось загрузить подписку из сети или кэша: ${freshError ?? 'нет ответа'}');
+}
 
 class ApiUnavailableException implements Exception {
   final String message;
@@ -56,6 +157,156 @@ Future<String> deviceId() async {
   return id;
 }
 
+bool isRussianBootstrapServer(String name) {
+  final value = name.toLowerCase();
+  return value.contains('russia') ||
+      value.contains('росси') ||
+      value.contains('moscow') ||
+      value.contains('москва') ||
+      value.contains('🇷🇺') ||
+      value.startsWith('ru-') ||
+      value.contains('| ru');
+}
+
+class BootstrapPage extends StatefulWidget {
+  const BootstrapPage({super.key});
+  @override State<BootstrapPage> createState() => _BootstrapPageState();
+}
+
+class _BootstrapPageState extends State<BootstrapPage> {
+  List<SingBoxServerConfig> servers = [];
+  String? selected;
+  String? error;
+  bool loading = true;
+  bool connecting = false;
+
+  @override void initState() {
+    super.initState();
+    loadBootstrapServers();
+  }
+
+  Future<void> loadBootstrapServers() async {
+    if (mounted) setState(() { loading = true; error = null; });
+    try {
+      http.Response? response;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          final candidate = await http.get(Uri.parse(subUrl), headers: const {
+            'Accept': 'text/plain, */*', 'Cache-Control': 'no-cache',
+            'User-Agent': 'IzviniteVpn/1.1',
+          }).timeout(const Duration(seconds: 25));
+          if (candidate.statusCode == 200) { response = candidate; break; }
+        } on TimeoutException { } on http.ClientException { }
+        if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+      }
+      final loaded = await loadSubscriptionWithCache(
+        subscriptionId: 'black-lte',
+        downloadedBody: response?.body,
+        contentType: response?.headers['content-type'],
+        cachedBody: await readSubscriptionCache(),
+      );
+      final eligible = loaded.servers.where((server) =>
+        server.enabled && server.outbound != null &&
+        !isRussianBootstrapServer(server.name)).take(20).toList();
+      if (eligible.isEmpty) throw Exception('В стартовой подписке не найдены доступные серверы вне РФ');
+      if (mounted) setState(() {
+        servers = eligible;
+        selected = eligible.first.id;
+        final cachedAt = DateTime.tryParse(loaded.updatedAt ?? '')?.toLocal();
+        error = loaded.fromCache
+          ? 'Показана сохранённая подписка; обновлена: ${cachedAt?.toString() ?? 'дата неизвестна'}.'
+          : null;
+      });
+    } catch (e) {
+      if (mounted) setState(() => error = 'Не удалось загрузить стартовые серверы: $e');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> connectAndContinue() async {
+    if (connecting || servers.isEmpty) return;
+    setState(() { connecting = true; error = null; });
+    try {
+      await SingBox.instance.connectToServers(
+        servers,
+        selectedId: selected ?? servers.first.id,
+      );
+      await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
+
+      if (api.token != null) {
+        try {
+          final me = await api.call('GET', '/auth/me');
+          if (!mounted) return;
+          Navigator.pushReplacement(context, MaterialPageRoute(
+            builder: (_) => me['user']?['role'] == 'admin'
+              ? const AdminPage() : const HomePage()));
+          return;
+        } on ApiUnavailableException {
+          rethrow;
+        } catch (_) {
+          final p = await SharedPreferences.getInstance();
+          await p.remove('session_token');
+          api.token = null;
+        }
+      }
+
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
+    } catch (e) {
+      if (mounted) setState(() => error = 'Не удалось продолжить через выбранное подключение: $e');
+    } finally {
+      if (mounted) setState(() => connecting = false);
+    }
+  }
+
+  @override Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Первоначальное подключение')),
+    body: ListView(padding: const EdgeInsets.all(22), children: [
+      const Icon(Icons.shield_outlined, color: orange, size: 64),
+      const SizedBox(height: 14),
+      const Text('Подключитесь для входа',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+      const SizedBox(height: 8),
+      const Text('Для первой авторизации показаны профили из стартовой подписки вне РФ. Выберите профиль вручную. Приложение не проверяет их работоспособность автоматически. После входа этот список больше не отображается.',
+        textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
+      const SizedBox(height: 20),
+      if (loading) const Center(child: CircularProgressIndicator(color: orange)),
+      if (!loading && servers.isEmpty)
+        FilledButton.tonal(onPressed: loadBootstrapServers,
+          child: const Text('Повторить загрузку серверов')),
+      ...servers.map((server) => Card(
+        color: panel,
+        child: RadioListTile<String>(
+          value: server.id,
+          groupValue: selected,
+          onChanged: connecting ? null : (value) => setState(() => selected = value),
+          title: Text(server.name),
+          subtitle: const Text('Профиль из подписки; доступность не проверена'),
+          activeColor: orange,
+        ),
+      )),
+      if (error != null) Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
+      ),
+      const SizedBox(height: 18),
+      FilledButton(
+        onPressed: loading || connecting || servers.isEmpty || apiUrl.isEmpty
+          ? null : connectAndContinue,
+        style: FilledButton.styleFrom(backgroundColor: orange, foregroundColor: Colors.black),
+        child: Text(connecting ? 'Подключение…' : 'Подключиться и продолжить'),
+      ),
+      if (apiUrl.isEmpty) const Padding(
+        padding: EdgeInsets.only(top: 12),
+        child: Text('Адрес сервера авторизации не настроен.',
+          textAlign: TextAlign.center, style: TextStyle(color: Colors.redAccent)),
+      ),
+    ]),
+  );
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SingBox.instance.initialize(const SingBoxOptions(android:SingBoxAndroidOptions(
@@ -90,15 +341,16 @@ class _SessionGateState extends State<SessionGate> {
         if (!mounted) return;
         openUser(me['user']);
         return;
-      } on ApiUnavailableException catch (e) {
-        if (mounted) setState(() { error = e.message; loading = false; });
+      } on ApiUnavailableException {
+        if (!mounted) return;
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const BootstrapPage()));
         return;
       } catch (_) {
         await p.remove('session_token');
         api.token = null;
       }
     }
-    if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
+    if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const BootstrapPage()));
   }
   void openUser(dynamic user) {
     Navigator.pushReplacement(context, MaterialPageRoute(
@@ -193,6 +445,18 @@ abstract class SessionState<T extends StatefulWidget> extends State<T> with Widg
     WidgetsBinding.instance.addObserver(this);
     _sessionTimer = Timer.periodic(const Duration(minutes: 15), (_) => ensureSession());
   }
+  Future<void> logout() async {
+    try { await SingBox.instance.disconnect(); } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('session_token');
+    await clearSubscriptionCache();
+    api.token = null;
+    if (mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const BootstrapPage()), (_) => false);
+    }
+  }
+
   Future<bool> ensureSession() async {
     if (_checkingSession || !mounted) return true;
     if (api.token == null) return false;
@@ -236,16 +500,15 @@ class HomePage extends StatefulWidget {
 
 class _HomeState extends SessionState<HomePage> {
   List<SingBoxServerConfig> servers = [];
-  final Map<String, int> ping = {};
   StreamSubscription<dynamic>? statsSub, statusSub, stateSub, groupsSub, logSub;
   String down = '0 B/s', up = '0 B/s';
   String? error, vpnError, coreDiagnostic, selected, activeServer;
-  bool loadingSubscription = false, checkingPing = false, connecting = false;
-  bool sortedByPing = false, isAdmin = false, disconnectingNow = false;
+  bool loadingSubscription = false, connecting = false;
+  bool isAdmin = false, disconnectingNow = false;
   SingBoxConnectionStatus vpnStatus = SingBox.instance.status;
 
   bool get connected => vpnStatus == SingBoxConnectionStatus.connected;
-  bool get busy => connecting || loadingSubscription || checkingPing;
+  bool get busy => connecting || loadingSubscription;
 
   // Mirror sing_box.connectToServers() tag generation so duplicate display
   // names still map back to their stable profile IDs.
@@ -283,12 +546,12 @@ class _HomeState extends SessionState<HomePage> {
     groupsSub = SingBox.instance.watchGroups().listen((groups) {
       final proxyGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.proxyTag).toList();
       if (proxyGroups.isEmpty) return;
-      var value = proxyGroups.first.selected?.toString();
+      var value = proxyGroups.first.selected.toString();
       if (value == SingBoxConfigBuilder.autoTag) {
         final autoGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.autoTag).toList();
-        if (autoGroups.isNotEmpty) value = autoGroups.first.selected?.toString();
+        if (autoGroups.isNotEmpty) value = autoGroups.first.selected.toString();
       }
-      if (value == null || value.isEmpty || value == SingBoxConfigBuilder.autoTag || !mounted) return;
+      if (value.isEmpty || value == SingBoxConfigBuilder.autoTag || !mounted) return;
       final server = _serverByOutboundTag[value];
       setState(() {
         activeServer = value;
@@ -372,99 +635,47 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> loadServers() async {
+    if (loadingSubscription || connecting) return;
     if (mounted) setState(() { loadingSubscription = true; error = null; });
     try {
-      final response = await http.get(Uri.parse(subUrl)).timeout(const Duration(seconds: 25));
-      if (response.statusCode != 200) throw Exception('HTTP ' + response.statusCode.toString());
-      await SingBox.instance.importServerConfigs(response.body, subscriptionId: 'black-lte');
-      final loaded = await SingBox.instance.getServerConfigs();
-      if (loaded.isEmpty) throw Exception('Подписка не содержит поддерживаемых серверов');
+      http.Response? response;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          final candidate = await http.get(Uri.parse(subUrl), headers: const {
+            'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
+            'Cache-Control': 'no-cache', 'User-Agent': 'IzviniteVpn/1.1',
+          }).timeout(const Duration(seconds: 25));
+          if (candidate.statusCode == 200) { response = candidate; break; }
+        } on TimeoutException { }
+          on http.ClientException { }
+        if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+      }
+      final loadedResult = await loadSubscriptionWithCache(
+        subscriptionId: 'black-lte',
+        downloadedBody: response?.body,
+        contentType: response?.headers['content-type'],
+        cachedBody: await readSubscriptionCache(),
+      );
+      final loaded = loadedResult.servers;
       if (mounted) setState(() {
         servers = loaded;
-        ping.clear();
-        if (selected == null || !servers.any((server) => server.id == selected)) selected = servers.first.id;
-        sortedByPing = false;
+        if (selected == null || !servers.any((server) => server.id == selected)) {
+          selected = servers.first.id;
+        }
+        final cachedAt = DateTime.tryParse(loadedResult.updatedAt ?? '')?.toLocal();
+        error = loadedResult.fromCache
+          ? 'Показана сохранённая подписка; обновлена: ${cachedAt?.toString() ?? 'дата неизвестна'}.'
+          : null;
       });
     } catch (e) {
-      if (mounted) setState(() => error = 'Не удалось загрузить подписку: ' + e.toString());
+      if (mounted) setState(() => error = 'Не удалось обновить подписку: ' + e.toString());
     } finally {
       if (mounted) setState(() => loadingSubscription = false);
     }
   }
 
-  Future<void> testPings() async {
-    if (servers.isEmpty || checkingPing || connecting || vpnStatus == SingBoxConnectionStatus.connecting) return;
-    final wasConnected = SingBox.instance.status == SingBoxConnectionStatus.connected;
-    if (!wasConnected) {
-      final proceed = await showDialog<bool>(context: context, builder: (dialogContext) => AlertDialog(
-        title: const Text('Проверка серверов'),
-        content: const Text('Чтобы проверить реальную работу прокси, приложение временно подключит VPN со списком серверов, проверит их и отключит туннель. Во время проверки интернет пойдёт через VPN.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Отмена')),
-          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Начать')),
-        ],
-      ));
-      if (proceed != true || !mounted) return;
-    }
-    if (!await ensureSession()) return;
-    if (mounted) setState(() { checkingPing = true; ping.clear(); error = null; });
-    try {
-      if (!wasConnected) {
-        await SingBox.instance.connectToServers(servers, selectedId: selected);
-        await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
-      }
-      final initialGroups = await SingBox.instance.watchGroups().first.timeout(const Duration(seconds: 8));
-      final hasAutoGroup = initialGroups.any((item) => item.tag == SingBoxConfigBuilder.autoTag && item.type == 'urltest');
-      if (hasAutoGroup) {
-        final testedAt = DateTime.now().subtract(const Duration(seconds: 1));
-        final group = await SingBox.instance.testGroup(
-          SingBoxConfigBuilder.autoTag,
-          timeout: const Duration(seconds: 90),
-        );
-        if (group == null) throw Exception('Не удалось получить результаты проверки серверов.');
-        final byTag = _serverByOutboundTag;
-        for (final item in group.items) {
-          final server = byTag[item.tag];
-          if (server != null && item.urlTestTime != null && !item.urlTestTime!.isBefore(testedAt) && mounted) {
-            setState(() => ping[server.id] = item.urlTestDelay ?? -1);
-          }
-        }
-      } else {
-        // A single-server configuration has no auto URL-test group.
-        final tag = await SingBox.instance.currentOutboundTag();
-        if (tag == null) throw Exception('Не удалось определить активный прокси-сервер.');
-        final result = await SingBox.instance.pingOutbound(tag, timeout: const Duration(seconds: 20));
-        final server = _serverByOutboundTag[tag];
-        if (server != null && mounted) setState(() => ping[server.id] = result.success ? result.ping : -1);
-      }
-      if (mounted) setState(() => sortedByPing = false);
-    } catch (e) {
-      if (mounted) setState(() => error = 'Не удалось проверить серверы: ' + e.toString());
-    } finally {
-      if (!wasConnected && SingBox.instance.status != SingBoxConnectionStatus.disconnected) {
-        try { await SingBox.instance.disconnect(); } catch (_) {}
-      }
-      if (mounted) setState(() => checkingPing = false);
-    }
-  }
-
-  void sortByPing() => setState(() => sortedByPing = true);
-
-  List<SingBoxServerConfig> get visibleServers {
-    final list = [...servers];
-    if (sortedByPing) {
-      list.sort((a, b) {
-        final pa = ping[a.id] ?? 999999, pb = ping[b.id] ?? 999999;
-        if (pa < 0 && pb >= 0) return 1;
-        if (pb < 0 && pa >= 0) return -1;
-        return pa.compareTo(pb);
-      });
-    }
-    return list;
-  }
-
   Future<void> toggleConnection({bool auto = false}) async {
-    if (connecting || checkingPing) return;
+    if (connecting) return;
     if (connected || vpnStatus == SingBoxConnectionStatus.connecting) {
       await disconnectVpn();
       return;
@@ -488,7 +699,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> disconnectVpn() async {
-    if (connecting || checkingPing) return;
+    if (connecting) return;
     HapticFeedback.selectionClick();
     setState(() { connecting = true; disconnectingNow = true; vpnError = null; });
     try {
@@ -502,7 +713,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> chooseServer(SingBoxServerConfig server) async {
-    if (connecting || checkingPing) return;
+    if (connecting) return;
     HapticFeedback.selectionClick();
     setState(() { selected = server.id; if (connected) connecting = true; vpnError = null; });
     try {
@@ -560,6 +771,11 @@ class _HomeState extends SessionState<HomePage> {
       appBar: AppBar(
         title: const Text('IzviniteVpn', style: TextStyle(fontWeight: FontWeight.w800)),
         actions: [
+          IconButton(
+            tooltip: 'Выйти из аккаунта',
+            onPressed: logout,
+            icon: const Icon(Icons.logout),
+          ),
           if (isAdmin) IconButton(
             tooltip: 'Панель администратора',
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminPage())),
@@ -683,24 +899,19 @@ class _HomeState extends SessionState<HomePage> {
             child: Text('Выбор сервера', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800))),
           Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Wrap(
             alignment: WrapAlignment.center, spacing: 6, children: [
-              TextButton.icon(onPressed: checkingPing || connecting ? null : () { testPings(); refreshSheet(() {}); },
-                icon: const Icon(Icons.speed, size: 18), label: const Text('Проверить серверы')),
               TextButton.icon(onPressed: loadingSubscription ? null : () async { await loadServers(); refreshSheet(() {}); },
                 icon: const Icon(Icons.refresh, size: 18), label: const Text('Обновить подписку')),
-              TextButton.icon(onPressed: () { sortByPing(); refreshSheet(() {}); },
-                icon: const Icon(Icons.sort, size: 18), label: const Text('Сортировка')),
             ],
           )),
-          if (checkingPing || loadingSubscription) const Padding(padding: EdgeInsets.symmetric(vertical: 4),
+          if (loadingSubscription) const Padding(padding: EdgeInsets.symmetric(vertical: 4),
             child: LinearProgressIndicator(color: orange)),
           Expanded(child: GridView.builder(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 18),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.2),
-            itemCount: visibleServers.length,
+            itemCount: servers.length,
             itemBuilder: (context, index) {
-              final server = visibleServers[index];
-              final latency = ping[server.id];
+              final server = servers[index];
               final active = connected && activeServer == server.name;
               final chosen = selected == server.id;
               return InkWell(
@@ -714,8 +925,8 @@ class _HomeState extends SessionState<HomePage> {
                       if (active) const Icon(Icons.check_circle, color: orange, size: 18)]),
                     Text(countryFor(server.name), maxLines: 2, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontWeight: FontWeight.w700)),
-                    Text(latency == null ? 'Не проверен' : latency < 0 ? 'Не прошёл тест' : 'Работает · $latency мс',
-                      style: TextStyle(fontSize: 12, color: latency != null && latency >= 0 ? Colors.greenAccent : latency != null ? Colors.redAccent : Colors.white54)),
+                    Text(chosen ? 'Выбран' : 'Нажмите, чтобы выбрать',
+                      style: const TextStyle(fontSize: 12, color: Colors.white54)),
                   ]),
                 ),
               );
@@ -927,6 +1138,7 @@ class _AdminState extends SessionState<AdminPage> {
     appBar: AppBar(title: const Text('Администрирование'), actions: [
       IconButton(tooltip: 'Открыть VPN', onPressed: () => Navigator.pushReplacement(
         context, MaterialPageRoute(builder: (_) => const HomePage())), icon: const Icon(Icons.vpn_key, color: orange)),
+      IconButton(tooltip: 'Выйти из аккаунта', onPressed: logout, icon: const Icon(Icons.logout)),
       IconButton(tooltip: 'Обновить', onPressed: load, icon: const Icon(Icons.refresh)),
     ]),
     floatingActionButton: FloatingActionButton.extended(
