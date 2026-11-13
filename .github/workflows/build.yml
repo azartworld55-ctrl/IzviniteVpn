@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ main ]
   push:
-    branches: [ main, master, feature/izvinitevpn-v2, feature/vpn-ui-admin-complete, fix/vpn-connectivity-diagnostics, feat/preauth-bootstrap-login ]
+    branches: [ main, master, feature/izvinitevpn-v2, feature/vpn-ui-admin-complete, fix/vpn-connectivity-diagnostics, feat/preauth-bootstrap-login, feat/vpn-health-speed ]
 
 concurrency:
   group: izvinitevpn-${{ github.workflow }}-${{ github.ref }}
