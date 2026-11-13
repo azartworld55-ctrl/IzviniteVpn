@@ -1,7 +1,7 @@
 name: izvinitevpn
 description: IzviniteVpn Android VPN client by Юсупов И.
 publish_to: "none"
-version: 1.1.0+2
+version: 2.0.0+3
 environment:
   sdk: ">=3.12.0 <4.0.0"
 dependencies:
