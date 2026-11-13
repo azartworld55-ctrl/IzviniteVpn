@@ -551,7 +551,7 @@ class _HomeState extends SessionState<HomePage> {
         final autoGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.autoTag).toList();
         if (autoGroups.isNotEmpty) value = autoGroups.first.selected.toString();
       }
-      if (value == null || value.isEmpty || value == SingBoxConfigBuilder.autoTag || !mounted) return;
+      if (value.isEmpty || value == SingBoxConfigBuilder.autoTag || !mounted) return;
       final server = _serverByOutboundTag[value];
       setState(() {
         activeServer = value;
