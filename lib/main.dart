@@ -236,16 +236,15 @@ class HomePage extends StatefulWidget {
 
 class _HomeState extends SessionState<HomePage> {
   List<SingBoxServerConfig> servers = [];
-  final Map<String, int> ping = {};
   StreamSubscription<dynamic>? statsSub, statusSub, stateSub, groupsSub, logSub;
   String down = '0 B/s', up = '0 B/s';
   String? error, vpnError, coreDiagnostic, selected, activeServer;
-  bool loadingSubscription = false, checkingPing = false, connecting = false;
-  bool sortedByPing = false, isAdmin = false, disconnectingNow = false;
+  bool loadingSubscription = false, connecting = false;
+  bool isAdmin = false, disconnectingNow = false;
   SingBoxConnectionStatus vpnStatus = SingBox.instance.status;
 
   bool get connected => vpnStatus == SingBoxConnectionStatus.connected;
-  bool get busy => connecting || loadingSubscription || checkingPing;
+  bool get busy => connecting || loadingSubscription;
 
   // Mirror sing_box.connectToServers() tag generation so duplicate display
   // names still map back to their stable profile IDs.
@@ -372,7 +371,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> loadServers() async {
-    if (loadingSubscription || checkingPing || connecting) return;
+    if (loadingSubscription || connecting) return;
     if (mounted) setState(() { loadingSubscription = true; error = null; });
     try {
       http.Response? response;
@@ -426,11 +425,9 @@ class _HomeState extends SessionState<HomePage> {
       }
       if (mounted) setState(() {
         servers = loaded;
-        ping.clear();
         if (selected == null || !servers.any((server) => server.id == selected)) {
           selected = servers.first.id;
         }
-        sortedByPing = false;
         error = null;
       });
     } catch (e) {
@@ -440,79 +437,8 @@ class _HomeState extends SessionState<HomePage> {
     }
   }
 
-  Future<void> testPings() async {
-    if (servers.isEmpty || checkingPing || connecting || vpnStatus == SingBoxConnectionStatus.connecting) return;
-    final wasConnected = SingBox.instance.status == SingBoxConnectionStatus.connected;
-    if (!wasConnected) {
-      final proceed = await showDialog<bool>(context: context, builder: (dialogContext) => AlertDialog(
-        title: const Text('Проверка серверов'),
-        content: const Text('Чтобы проверить реальную работу прокси, приложение временно подключит VPN со списком серверов, проверит их и отключит туннель. Во время проверки интернет пойдёт через VPN.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Отмена')),
-          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Начать')),
-        ],
-      ));
-      if (proceed != true || !mounted) return;
-    }
-    if (!await ensureSession()) return;
-    if (mounted) setState(() { checkingPing = true; ping.clear(); error = null; });
-    try {
-      if (!wasConnected) {
-        await SingBox.instance.connectToServers(servers, selectedId: selected);
-        await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
-      }
-      final initialGroups = await SingBox.instance.watchGroups().first.timeout(const Duration(seconds: 8));
-      final hasAutoGroup = initialGroups.any((item) => item.tag == SingBoxConfigBuilder.autoTag && item.type == 'urltest');
-      if (hasAutoGroup) {
-        final testedAt = DateTime.now().subtract(const Duration(seconds: 1));
-        final group = await SingBox.instance.testGroup(
-          SingBoxConfigBuilder.autoTag,
-          timeout: const Duration(seconds: 90),
-        );
-        if (group == null) throw Exception('Не удалось получить результаты проверки серверов.');
-        final byTag = _serverByOutboundTag;
-        for (final item in group.items) {
-          final server = byTag[item.tag];
-          if (server != null && item.urlTestTime != null && !item.urlTestTime!.isBefore(testedAt) && mounted) {
-            setState(() => ping[server.id] = item.urlTestDelay ?? -1);
-          }
-        }
-      } else {
-        // A single-server configuration has no auto URL-test group.
-        final tag = await SingBox.instance.currentOutboundTag();
-        if (tag == null) throw Exception('Не удалось определить активный прокси-сервер.');
-        final result = await SingBox.instance.pingOutbound(tag, timeout: const Duration(seconds: 20));
-        final server = _serverByOutboundTag[tag];
-        if (server != null && mounted) setState(() => ping[server.id] = result.success ? result.ping : -1);
-      }
-      if (mounted) setState(() => sortedByPing = false);
-    } catch (e) {
-      if (mounted) setState(() => error = 'Не удалось проверить серверы: ' + e.toString());
-    } finally {
-      if (!wasConnected && SingBox.instance.status != SingBoxConnectionStatus.disconnected) {
-        try { await SingBox.instance.disconnect(); } catch (_) {}
-      }
-      if (mounted) setState(() => checkingPing = false);
-    }
-  }
-
-  void sortByPing() => setState(() => sortedByPing = true);
-
-  List<SingBoxServerConfig> get visibleServers {
-    final list = [...servers];
-    if (sortedByPing) {
-      list.sort((a, b) {
-        final pa = ping[a.id] ?? 999999, pb = ping[b.id] ?? 999999;
-        if (pa < 0 && pb >= 0) return 1;
-        if (pb < 0 && pa >= 0) return -1;
-        return pa.compareTo(pb);
-      });
-    }
-    return list;
-  }
-
   Future<void> toggleConnection({bool auto = false}) async {
-    if (connecting || checkingPing) return;
+    if (connecting) return;
     if (connected || vpnStatus == SingBoxConnectionStatus.connecting) {
       await disconnectVpn();
       return;
@@ -536,7 +462,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> disconnectVpn() async {
-    if (connecting || checkingPing) return;
+    if (connecting) return;
     HapticFeedback.selectionClick();
     setState(() { connecting = true; disconnectingNow = true; vpnError = null; });
     try {
@@ -550,7 +476,7 @@ class _HomeState extends SessionState<HomePage> {
   }
 
   Future<void> chooseServer(SingBoxServerConfig server) async {
-    if (connecting || checkingPing) return;
+    if (connecting) return;
     HapticFeedback.selectionClick();
     setState(() { selected = server.id; if (connected) connecting = true; vpnError = null; });
     try {
@@ -731,24 +657,19 @@ class _HomeState extends SessionState<HomePage> {
             child: Text('Выбор сервера', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800))),
           Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Wrap(
             alignment: WrapAlignment.center, spacing: 6, children: [
-              TextButton.icon(onPressed: checkingPing || connecting ? null : () { testPings(); refreshSheet(() {}); },
-                icon: const Icon(Icons.speed, size: 18), label: const Text('Проверить серверы')),
               TextButton.icon(onPressed: loadingSubscription ? null : () async { await loadServers(); refreshSheet(() {}); },
                 icon: const Icon(Icons.refresh, size: 18), label: const Text('Обновить подписку')),
-              TextButton.icon(onPressed: () { sortByPing(); refreshSheet(() {}); },
-                icon: const Icon(Icons.sort, size: 18), label: const Text('Сортировка')),
             ],
           )),
-          if (checkingPing || loadingSubscription) const Padding(padding: EdgeInsets.symmetric(vertical: 4),
+          if (loadingSubscription) const Padding(padding: EdgeInsets.symmetric(vertical: 4),
             child: LinearProgressIndicator(color: orange)),
           Expanded(child: GridView.builder(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 18),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.2),
-            itemCount: visibleServers.length,
+            itemCount: servers.length,
             itemBuilder: (context, index) {
-              final server = visibleServers[index];
-              final latency = ping[server.id];
+              final server = servers[index];
               final active = connected && activeServer == server.name;
               final chosen = selected == server.id;
               return InkWell(
@@ -762,8 +683,8 @@ class _HomeState extends SessionState<HomePage> {
                       if (active) const Icon(Icons.check_circle, color: orange, size: 18)]),
                     Text(countryFor(server.name), maxLines: 2, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontWeight: FontWeight.w700)),
-                    Text(latency == null ? 'Не проверен' : latency < 0 ? 'Не прошёл тест' : 'Работает · $latency мс',
-                      style: TextStyle(fontSize: 12, color: latency != null && latency >= 0 ? Colors.greenAccent : latency != null ? Colors.redAccent : Colors.white54)),
+                    Text(chosen ? 'Выбран' : 'Нажмите, чтобы выбрать',
+                      style: const TextStyle(fontSize: 12, color: Colors.white54)),
                   ]),
                 ),
               );
