@@ -798,7 +798,12 @@ class _HomeState extends SessionState<HomePage> {
       );
       final loaded = loadedResult.servers;
       if (mounted) setState(() {
-        servers = loaded;
+        // The BLACK_LTE feed is the source for every VPN screen. Keep only
+        // supported non-Russian nodes consistently, not just during bootstrap.
+        servers = loaded.where((server) =>
+          server.enabled && server.outbound != null &&
+          !isRussianBootstrapServer(server.name)).toList();
+        if (servers.isEmpty) throw Exception('В BLACK_LTE не найдено доступных серверов вне РФ');
         if (selected == null || !servers.any((server) => server.id == selected)) {
           selected = servers.first.id;
         }
