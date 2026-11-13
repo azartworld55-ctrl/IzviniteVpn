@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -178,18 +179,44 @@ class _BootstrapServerCheck {
   const _BootstrapServerCheck({
     required this.serverId,
     this.pingMs,
-    this.downloadMbps,
-    this.uploadMbps,
     this.exitIp,
     this.error,
   });
   final String serverId;
   final int? pingMs;
-  final double? downloadMbps;
-  final double? uploadMbps;
   final String? exitIp;
   final String? error;
-  bool get working => error == null && pingMs != null;
+  bool get working => error == null && pingMs != null && exitIp != null;
+}
+
+Future<String?> _fetchBootstrapIp() async {
+  try {
+    final response = await http.get(Uri.parse('https://api.ipify.org'))
+        .timeout(const Duration(seconds: 3));
+    final ip = response.body.trim();
+    if (response.statusCode == 200 && InternetAddress.tryParse(ip) != null) {
+      return ip;
+    }
+  } catch (_) {}
+  return null;
+}
+
+class _BootstrapProbe {
+  const _BootstrapProbe(this.latencyMs, this.ip);
+  final int latencyMs;
+  final String ip;
+}
+
+Future<_BootstrapProbe> _probeBootstrapTunnel() async {
+  final watch = Stopwatch()..start();
+  final response = await http.get(Uri.parse('https://api.ipify.org'))
+      .timeout(const Duration(seconds: 4));
+  watch.stop();
+  final ip = response.body.trim();
+  if (response.statusCode != 200 || InternetAddress.tryParse(ip) == null) {
+    throw Exception('Нет ответа через VPN-туннель');
+  }
+  return _BootstrapProbe(watch.elapsedMilliseconds, ip);
 }
 
 class _BootstrapPageState extends State<BootstrapPage> {
@@ -201,6 +228,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
   bool scanning = false;
   bool connecting = false;
   int checkedCount = 0;
+  int scanTotal = 0;
   String scanMessage = 'Загружаем список серверов…';
 
   @override void initState() {
@@ -210,8 +238,9 @@ class _BootstrapPageState extends State<BootstrapPage> {
 
   Future<void> loadBootstrapServers() async {
     if (mounted) setState(() {
-      loading = true; scanning = false; checkedCount = 0;
-      checks.clear(); error = null; scanMessage = 'Загружаем список серверов…';
+      loading = true; scanning = false; checkedCount = 0; scanTotal = 0;
+      checks.clear(); servers = []; selected = null;
+      error = null; scanMessage = 'Загружаем список серверов…';
     });
     try {
       http.Response? response;
@@ -219,11 +248,11 @@ class _BootstrapPageState extends State<BootstrapPage> {
         try {
           final candidate = await http.get(Uri.parse(subUrl), headers: const {
             'Accept': 'text/plain, */*', 'Cache-Control': 'no-cache',
-            'User-Agent': 'IzviniteVpn/1.1',
-          }).timeout(const Duration(seconds: 25));
+            'User-Agent': 'IzviniteVpn/2.0',
+          }).timeout(const Duration(seconds: 12));
           if (candidate.statusCode == 200) { response = candidate; break; }
         } on TimeoutException { } on http.ClientException { }
-        if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+        if (attempt < 2) await Future.delayed(Duration(milliseconds: 400 * (attempt + 1)));
       }
       final loaded = await loadSubscriptionWithCache(
         subscriptionId: 'black-lte',
@@ -233,17 +262,19 @@ class _BootstrapPageState extends State<BootstrapPage> {
       );
       final eligible = loaded.servers.where((server) =>
         server.enabled && server.outbound != null &&
-        !isRussianBootstrapServer(server.name)).take(3).toList();
-      if (eligible.length < 3) {
-        throw Exception('Для проверки нужны три сервера вне РФ, сейчас найдено: ' + eligible.length.toString());
+        !isRussianBootstrapServer(server.name)).take(30).toList();
+      if (eligible.isEmpty) {
+        throw Exception('В подписке не найдено подходящих серверов вне РФ');
       }
       if (mounted) setState(() {
-        servers = eligible; selected = eligible.first.id;
+        servers = eligible;
+        scanTotal = eligible.length;
         loading = false; scanning = true;
-        scanMessage = 'Подготавливаем проверку ' + eligible.length.toString() + ' серверов…';
+        scanMessage = 'Ищем три работающих сервера…';
         final cachedAt = DateTime.tryParse(loaded.updatedAt ?? '')?.toLocal();
         error = loaded.fromCache
-          ? 'Используется сохранённая подписка; обновлена: ' + (cachedAt?.toString() ?? 'дата неизвестна') + '.'
+          ? 'Используется сохранённый список; обновлён: ' +
+              (cachedAt?.toString() ?? 'дата неизвестна') + '.'
           : null;
       });
       await checkBootstrapServers(eligible);
@@ -257,32 +288,35 @@ class _BootstrapPageState extends State<BootstrapPage> {
 
   Future<void> checkBootstrapServers(List<SingBoxServerConfig> candidates) async {
     final box = SingBox.instance;
-    final baselineIp = await fetchExternalIp();
-    for (var index = 0; index < candidates.length; index++) {
+    final baselineIp = await _fetchBootstrapIp();
+    var workingCount = 0;
+
+    for (var index = 0; index < candidates.length && workingCount < 3; index++) {
       final server = candidates[index];
       if (!mounted) return;
       setState(() {
         scanMessage = 'Проверяем сервер ' + (index + 1).toString() + ' из ' +
           candidates.length.toString() + ': ' + server.name;
       });
+
       _BootstrapServerCheck result;
       try {
-        // Speed tests require a temporary tunnel through the candidate server.
-        await box.connectToServers([server], selectedId: server.id);
-        await box.waitForStatus(SingBoxConnectionStatus.connected);
-        final pingResult = await box.pingCurrentServer();
-        final speedResult = await box.testSpeed();
-        final ip = await fetchExternalIp();
+        await box.connectToServers([server], selectedId: server.id)
+            .timeout(const Duration(seconds: 7));
+        await box.waitForStatus(SingBoxConnectionStatus.connected)
+            .timeout(const Duration(seconds: 7));
+
+        // One small HTTPS request through the active system tunnel. Its
+        // elapsed time is the connectivity latency; no large speed test runs
+        // during bootstrap discovery.
+        final probe = await _probeBootstrapTunnel();
+        final sameIp = baselineIp != null && baselineIp == probe.ip;
         result = _BootstrapServerCheck(
           serverId: server.id,
-          pingMs: pingResult.success ? pingResult.ping.round() : null,
-          downloadMbps: speedResult.downloadMbps,
-          uploadMbps: speedResult.uploadMbps,
-          exitIp: ip,
-          error: !pingResult.success
-            ? 'Подключение есть, но проверка задержки не прошла'
-            : (baselineIp != null && ip != null && baselineIp == ip)
-              ? 'Внешний IP не изменился — маршрут через VPN не подтверждён'
+          pingMs: probe.latencyMs,
+          exitIp: probe.ip,
+          error: sameIp
+              ? 'Внешний IP не изменился — VPN-маршрут не подтверждён'
               : null,
         );
       } catch (e) {
@@ -292,23 +326,43 @@ class _BootstrapPageState extends State<BootstrapPage> {
         );
       } finally {
         try {
-          if (box.status != SingBoxConnectionStatus.disconnected) await box.disconnect();
-        } catch (_) { }
+          if (box.status != SingBoxConnectionStatus.disconnected) {
+            await box.disconnect().timeout(const Duration(seconds: 3));
+            await box.waitForStatus(SingBoxConnectionStatus.disconnected)
+                .timeout(const Duration(seconds: 3));
+          }
+        } catch (_) {}
       }
+
       if (!mounted) return;
       setState(() {
         checks[server.id] = result;
         checkedCount = index + 1;
+        if (result.working) {
+          workingCount++;
+          if (selected == null) selected = server.id;
+        }
       });
     }
-    if (mounted) setState(() {
+
+    if (!mounted) return;
+    setState(() {
+      servers = candidates.where((server) => checks[server.id]?.working == true).toList();
+      selected = servers.isEmpty ? null : (servers.any((s) => s.id == selected)
+          ? selected : servers.first.id);
       scanning = false;
-      scanMessage = 'Проверка завершена';
+      scanMessage = workingCount == 3
+          ? 'Найдены три работающих сервера'
+          : 'Найдено работающих серверов: ' + workingCount.toString();
+      if (workingCount < 3) {
+        error = 'Удалось подтвердить только ' + workingCount.toString() +
+            ' из 3 серверов. Авторизация не начнётся, пока не будут найдены три.';
+      }
     });
   }
 
   Future<void> connectAndContinue() async {
-    if (connecting || scanning || servers.isEmpty || selected == null) return;
+    if (connecting || scanning || servers.length < 3 || selected == null) return;
     final selectedCheck = checks[selected!];
     if (selectedCheck == null || !selectedCheck.working) {
       setState(() => error = 'Выберите сервер, который прошёл проверку.');
@@ -388,7 +442,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
         textAlign: TextAlign.center,
         style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
       const SizedBox(height: 8),
-      const Text('Сначала приложение проверит три сервера вне РФ: подключение, задержку и реальную скорость. После проверки выберите подходящий сервер и перейдите к авторизации.',
+      const Text('Приложение проверяет серверы из подписки по очереди и оставляет три, через которые действительно проходит соединение. Измеряется задержка HTTPS-запроса через VPN.',
         textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
       const SizedBox(height: 20),
       if (loading) ...[
@@ -409,15 +463,15 @@ class _BootstrapPageState extends State<BootstrapPage> {
           color: orange, backgroundColor: Colors.white12,
         ),
         const SizedBox(height: 6),
-        Text('Проверено ' + checkedCount.toString() + ' из ' + servers.length.toString(),
+        Text('Проверено ' + checkedCount.toString() + ' из ' + scanTotal.toString(),
           textAlign: TextAlign.end,
           style: const TextStyle(color: Colors.white54, fontSize: 12)),
       ],
-      if (!loading && servers.isEmpty)
+      if (!loading && (servers.isEmpty || (!scanning && servers.length < 3)))
         FilledButton.tonal(onPressed: loadBootstrapServers,
           child: const Text('Повторить загрузку серверов')),
       ...servers.map(_serverCard),
-      if (!scanning && servers.isNotEmpty && checks.values.every((item) => !item.working))
+      if (!scanning && servers.length < 3)
         const Padding(
           padding: EdgeInsets.only(top: 8),
           child: Text('Ни один сервер не прошёл проверку. Попробуйте обновить список позже.',
