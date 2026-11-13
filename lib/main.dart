@@ -396,10 +396,13 @@ class _BootstrapPageState extends State<BootstrapPage> {
       if (api.token != null) {
         try {
           final me = await api.call('GET', '/auth/me');
+          await SingBox.instance.disconnect();
+          await SingBox.instance.waitForStatus(SingBoxConnectionStatus.disconnected)
+              .timeout(const Duration(seconds: 6));
           if (!mounted) return;
-          Navigator.pushReplacement(context, MaterialPageRoute(
+          Navigator.pushAndRemoveUntil(context, MaterialPageRoute(
             builder: (_) => me['user']?['role'] == 'admin'
-              ? const AdminPage() : const HomePage()));
+              ? const AdminPage() : const HomePage()), (_) => false);
           return;
         } on ApiUnavailableException {
           rethrow;
@@ -410,7 +413,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
         }
       }
       if (!mounted) return;
-      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
+      Navigator.push(context, MaterialPageRoute(builder: (_) => const LoginPage()));
     } catch (e) {
       if (mounted) setState(() => error = 'Не удалось подключиться к выбранному серверу: ' + e.toString());
     } finally {
@@ -593,13 +596,23 @@ class _LoginState extends State<LoginPage> {
       await p.setString('session_token',api.token!);
       if(!mounted)return;
       final u=d['user'];
-      Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>d['mustChangePassword']==true
-        ? ChangePasswordPage(initialKey:k.text) : u['role']=='admin'?const AdminPage():const HomePage()));
+      await SingBox.instance.disconnect();
+      await SingBox.instance.waitForStatus(SingBoxConnectionStatus.disconnected)
+          .timeout(const Duration(seconds: 6));
+      if (!mounted) return;
+      if (d['mustChangePassword'] == true) {
+        Navigator.pushReplacement(context, MaterialPageRoute(
+          builder: (_) => ChangePasswordPage(initialKey: k.text)));
+      } else {
+        Navigator.pushAndRemoveUntil(context, MaterialPageRoute(
+          builder: (_) => u['role'] == 'admin' ? const AdminPage() : const HomePage()),
+          (_) => false);
+      }
     } catch(e){setState(()=>error=e.toString().replaceFirst('Exception: ',''));}
     finally{if(mounted)setState(()=>busy=false);}
   }
   @override void dispose(){n.dispose();k.dispose();super.dispose();}
-  @override Widget build(BuildContext c)=>Scaffold(body:SafeArea(child:Center(child:SingleChildScrollView(
+  @override Widget build(BuildContext c)=>Scaffold(appBar:AppBar(leading:IconButton(tooltip:'Назад к выбору VPN',icon:const Icon(Icons.arrow_back),onPressed:busy?null:(){if(Navigator.canPop(context)){Navigator.pop(context);}else{Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>const BootstrapPage()));}}),title:const Text('Авторизация')),body:SafeArea(child:Center(child:SingleChildScrollView(
     padding:const EdgeInsets.all(24),
     child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:420),child:Column(
       crossAxisAlignment:CrossAxisAlignment.stretch,children:[
@@ -633,7 +646,9 @@ class _ChangePasswordState extends State<ChangePasswordPage>{
       final d=await api.call('POST','/auth/change-password',{'currentKey':widget.initialKey,'newKey':a.text});
       api.token=d['token'];final p=await SharedPreferences.getInstance();await p.setString('session_token',api.token!);
       final me=await api.call('GET','/auth/me');if(!mounted)return;
-      Navigator.pushReplacement(context,MaterialPageRoute(builder:(_)=>me['user']['role']=='admin'?const AdminPage():const HomePage()));
+      Navigator.pushAndRemoveUntil(context,MaterialPageRoute(
+        builder: (_) => me['user']['role'] == 'admin' ? const AdminPage() : const HomePage()),
+        (_) => false);
     }catch(e){setState(()=>error=e.toString());}finally{if(mounted)setState(()=>busy=false);}
   }
   @override void dispose(){a.dispose();b.dispose();super.dispose();}
@@ -708,6 +723,10 @@ class HomePage extends StatefulWidget {
 
 class _HomeState extends SessionState<HomePage> {
   List<SingBoxServerConfig> servers = [];
+  final Map<String, int> serverLatency = {};
+  bool checkingServers = false;
+  bool sortedByLatency = false;
+  String? diagnosticsError;
   StreamSubscription<dynamic>? statsSub, statusSub, stateSub, groupsSub, logSub;
   String down = '0 B/s', up = '0 B/s';
   String? error, vpnError, coreDiagnostic, selected, activeServer;
@@ -886,6 +905,8 @@ class _HomeState extends SessionState<HomePage> {
       if (filtered.isEmpty) throw Exception('В обоих источниках нет доступных серверов вне РФ');
       if (mounted) setState(() {
         servers = filtered;
+        serverLatency.clear();
+        sortedByLatency = false;
         if (selected == null || !servers.any((server) => server.id == selected)) {
           selected = servers.first.id;
         }
@@ -895,6 +916,77 @@ class _HomeState extends SessionState<HomePage> {
       if (mounted) setState(() => error = 'Не удалось обновить подписки: ' + e.toString());
     } finally {
       if (mounted) setState(() => loadingSubscription = false);
+    }
+  }
+
+  List<SingBoxServerConfig> get displayedServers {
+    final result = List<SingBoxServerConfig>.of(servers);
+    if (sortedByLatency) {
+      result.sort((a, b) {
+        final ap = serverLatency[a.id] ?? 1 << 30;
+        final bp = serverLatency[b.id] ?? 1 << 30;
+        return ap.compareTo(bp);
+      });
+    }
+    return result;
+  }
+
+  void toggleLatencySort() {
+    setState(() => sortedByLatency = !sortedByLatency);
+  }
+
+  Future<void> testServerDiagnostics() async {
+    if (servers.isEmpty || checkingServers || connecting || loadingSubscription) return;
+    final wasConnected = SingBox.instance.status == SingBoxConnectionStatus.connected;
+    if (!wasConnected) {
+      final proceed = await showDialog<bool>(context: context, builder: (dialogContext) => AlertDialog(
+        title: const Text('Диагностика VPN'),
+        content: const Text('Для проверки всех серверов приложение временно подключит список серверов, выполнит URL-тест через sing-box и отключит VPN после проверки. Запуск только вручную.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Начать проверку')),
+        ],
+      ));
+      if (proceed != true || !mounted) return;
+    }
+    if (!await ensureSession()) return;
+    setState(() {
+      checkingServers = true;
+      diagnosticsError = null;
+      serverLatency.clear();
+    });
+    try {
+      if (!wasConnected) {
+        await SingBox.instance.connectToServers(servers, selectedId: selected);
+        await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected)
+            .timeout(const Duration(seconds: 12));
+      }
+      final group = await SingBox.instance.testGroup(SingBoxConfigBuilder.proxyTag,
+        timeout: const Duration(seconds: 90));
+      if (group == null) throw Exception('sing-box не вернул результаты URL-теста.');
+      final byTag = _serverByOutboundTag;
+      final results = <String, int>{};
+      for (final item in group.items) {
+        final server = byTag[item.tag];
+        if (server != null) results[server.id] = item.urlTestDelay ?? -1;
+      }
+      if (mounted) setState(() {
+        serverLatency.addAll(results);
+        for (final server in servers) {
+          serverLatency.putIfAbsent(server.id, () => -1);
+        }
+      });
+    } catch (e) {
+      if (mounted) setState(() => diagnosticsError = e.toString().replaceFirst('Exception: ', ''));
+    } finally {
+      if (!wasConnected) {
+        try {
+          await SingBox.instance.disconnect();
+          await SingBox.instance.waitForStatus(SingBoxConnectionStatus.disconnected)
+              .timeout(const Duration(seconds: 6));
+        } catch (_) {}
+      }
+      if (mounted) setState(() => checkingServers = false);
     }
   }
 
@@ -1119,40 +1211,73 @@ class _HomeState extends SessionState<HomePage> {
     showModalBottomSheet(
       context: context, isScrollControlled: true, backgroundColor: panel,
       builder: (sheetContext) => SafeArea(child: SizedBox(
-        height: MediaQuery.of(sheetContext).size.height * .88,
+        height: MediaQuery.of(sheetContext).size.height * .90,
         child: StatefulBuilder(builder: (context, refreshSheet) => Column(children: [
-          const Padding(padding: EdgeInsets.fromLTRB(18, 18, 18, 10),
+          const Padding(padding: EdgeInsets.fromLTRB(18, 18, 18, 8),
             child: Text('Выбор сервера', style: TextStyle(fontSize: 19, fontWeight: FontWeight.w800))),
-          Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Wrap(
-            alignment: WrapAlignment.center, spacing: 6, children: [
-              TextButton.icon(onPressed: loadingSubscription ? null : () async { await loadServers(); refreshSheet(() {}); },
-                icon: const Icon(Icons.refresh, size: 18), label: const Text('Обновить подписку')),
+          Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Wrap(
+            alignment: WrapAlignment.center, spacing: 4, runSpacing: 2, children: [
+              TextButton.icon(
+                onPressed: checkingServers || connecting ? null : () async {
+                  await testServerDiagnostics();
+                  refreshSheet(() {});
+                },
+                icon: const Icon(Icons.network_check, size: 18),
+                label: const Text('Диагностика'),
+              ),
+              TextButton.icon(
+                onPressed: checkingServers ? null : () {
+                  toggleLatencySort();
+                  refreshSheet(() {});
+                },
+                icon: const Icon(Icons.sort, size: 18),
+                label: Text(sortedByLatency ? 'Сначала по списку' : 'По задержке'),
+              ),
+              TextButton.icon(
+                onPressed: loadingSubscription || connecting ? null : () async {
+                  await loadServers();
+                  refreshSheet(() {});
+                },
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('Обновить подписку'),
+              ),
             ],
           )),
-          if (loadingSubscription) const Padding(padding: EdgeInsets.symmetric(vertical: 4),
-            child: LinearProgressIndicator(color: orange)),
+          if (checkingServers || loadingSubscription)
+            const Padding(padding: EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+              child: LinearProgressIndicator(color: orange)),
+          if (diagnosticsError != null)
+            Padding(padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+              child: Text(diagnosticsError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12))),
           Expanded(child: GridView.builder(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 18),
             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
               crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.2),
-            itemCount: servers.length,
+            itemCount: displayedServers.length,
             itemBuilder: (context, index) {
-              final server = servers[index];
+              final server = displayedServers[index];
+              final latency = serverLatency[server.id];
               final active = connected && activeServer == server.name;
               final chosen = selected == server.id;
+              final latencyLabel = latency == null ? 'Не проверен'
+                  : latency < 0 ? 'Не прошёл тест' : '$latency мс';
               return InkWell(
-                borderRadius: BorderRadius.circular(18), onTap: () => chooseServer(server),
+                borderRadius: BorderRadius.circular(18),
+                onTap: connecting || checkingServers ? null : () => chooseServer(server),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 180), padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(color: const Color(0xFF222222), borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: active || chosen ? orange : Colors.white12, width: active || chosen ? 2 : 1)),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    border: Border.all(color: active || chosen ? orange : Colors.white12,
+                      width: active || chosen ? 2 : 1)),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                     Row(children: [Text(flagFor(server.name), style: const TextStyle(fontSize: 23)), const Spacer(),
                       if (active) const Icon(Icons.check_circle, color: orange, size: 18)]),
                     Text(countryFor(server.name), maxLines: 2, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontWeight: FontWeight.w700)),
-                    Text(chosen ? 'Выбран' : 'Нажмите, чтобы выбрать',
-                      style: const TextStyle(fontSize: 12, color: Colors.white54)),
+                    Text(chosen ? 'Выбран · $latencyLabel' : latencyLabel,
+                      style: TextStyle(fontSize: 12, color: latency == null ? Colors.white54
+                        : latency < 0 ? Colors.redAccent : Colors.lightGreenAccent)),
                   ]),
                 ),
               );
