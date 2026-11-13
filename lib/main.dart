@@ -16,14 +16,24 @@ final api = Api();
 const secureStorage = FlutterSecureStorage();
 
 Future<String?> readSubscriptionCache() async {
-  final secure = await secureStorage.read(key: 'subscription_cache_black_lte');
-  if (secure != null && secure.isNotEmpty) return secure;
-  // One-time migration from the legacy plaintext SharedPreferences key.
+  try {
+    final secure = await secureStorage.read(key: 'subscription_cache_black_lte');
+    if (secure != null && secure.isNotEmpty) return secure;
+  } catch (_) {
+    // A lost/unavailable Keystore key must not prevent the legacy cache fallback.
+  }
   final prefs = await SharedPreferences.getInstance();
   final legacy = prefs.getString('subscription_cache_black_lte');
   if (legacy != null && legacy.isNotEmpty) {
-    await secureStorage.write(key: 'subscription_cache_black_lte', value: legacy);
-    await prefs.remove('subscription_cache_black_lte');
+    try {
+      await secureStorage.write(key: 'subscription_cache_black_lte', value: legacy);
+      final verified = await secureStorage.read(key: 'subscription_cache_black_lte');
+      if (verified == legacy) {
+        await prefs.remove('subscription_cache_black_lte');
+      }
+    } catch (_) {
+      // Keep the legacy copy unless the encrypted write was read back successfully.
+    }
   }
   return legacy;
 }
@@ -238,7 +248,6 @@ class _BootstrapPageState extends State<BootstrapPage> {
         } catch (_) {
           final p = await SharedPreferences.getInstance();
           await p.remove('session_token');
-          await clearSubscriptionCache();
           api.token = null;
         }
       }
@@ -339,7 +348,6 @@ class _SessionGateState extends State<SessionGate> {
         return;
       } catch (_) {
         await p.remove('session_token');
-        await clearSubscriptionCache();
         api.token = null;
       }
     }
@@ -438,6 +446,18 @@ abstract class SessionState<T extends StatefulWidget> extends State<T> with Widg
     WidgetsBinding.instance.addObserver(this);
     _sessionTimer = Timer.periodic(const Duration(minutes: 15), (_) => ensureSession());
   }
+  Future<void> logout() async {
+    try { await SingBox.instance.disconnect(); } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('session_token');
+    await clearSubscriptionCache();
+    api.token = null;
+    if (mounted) {
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const BootstrapPage()), (_) => false);
+    }
+  }
+
   Future<bool> ensureSession() async {
     if (_checkingSession || !mounted) return true;
     if (api.token == null) return false;
@@ -454,7 +474,6 @@ abstract class SessionState<T extends StatefulWidget> extends State<T> with Widg
       try { await SingBox.instance.disconnect(); } catch (_) {}
       final p = await SharedPreferences.getInstance();
       await p.remove('session_token');
-      await clearSubscriptionCache();
       api.token = null;
       if (mounted) {
         Navigator.of(context).pushAndRemoveUntil(
@@ -753,6 +772,11 @@ class _HomeState extends SessionState<HomePage> {
       appBar: AppBar(
         title: const Text('IzviniteVpn', style: TextStyle(fontWeight: FontWeight.w800)),
         actions: [
+          IconButton(
+            tooltip: 'Выйти из аккаунта',
+            onPressed: logout,
+            icon: const Icon(Icons.logout),
+          ),
           if (isAdmin) IconButton(
             tooltip: 'Панель администратора',
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminPage())),
@@ -1115,6 +1139,7 @@ class _AdminState extends SessionState<AdminPage> {
     appBar: AppBar(title: const Text('Администрирование'), actions: [
       IconButton(tooltip: 'Открыть VPN', onPressed: () => Navigator.pushReplacement(
         context, MaterialPageRoute(builder: (_) => const HomePage())), icon: const Icon(Icons.vpn_key, color: orange)),
+      IconButton(tooltip: 'Выйти из аккаунта', onPressed: logout, icon: const Icon(Icons.logout)),
       IconButton(tooltip: 'Обновить', onPressed: load, icon: const Icon(Icons.refresh)),
     ]),
     floatingActionButton: FloatingActionButton.extended(
