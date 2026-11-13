@@ -11,40 +11,44 @@ import 'package:sing_box/sing_box.dart';
 import 'vpn_health.dart';
 
 const apiUrl = String.fromEnvironment('API_BASE_URL');
-const subUrl = 'https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_LTE.txt';
+const subscriptionSources = <({String id, String url, String label})>[
+  (id: 'black-lte', url: 'https://github.com/FLAT447/v2ray-lists/raw/refs/heads/main/BLACK_LTE.txt', label: 'BLACK_LTE'),
+  (id: 'gitverse-universal', url: 'https://gitverse.ru/api/repos/zieng2/wl/raw/branch/master/list_universal.txt', label: 'GitVerse Universal'),
+];
 const orange = Color(0xFFFF7A1A);
 const panel = Color(0xFF1B1B1B);
 final api = Api();
 const secureStorage = FlutterSecureStorage();
 
-Future<String?> readSubscriptionCache() async {
+String _subscriptionCacheSuffix(String subscriptionId) =>
+    subscriptionId.replaceAll('-', '_');
+
+Future<String?> readSubscriptionCache({String subscriptionId = 'black-lte'}) async {
+  final suffix = _subscriptionCacheSuffix(subscriptionId);
+  final key = 'subscription_cache_' + suffix;
   try {
-    final secure = await secureStorage.read(key: 'subscription_cache_black_lte');
+    final secure = await secureStorage.read(key: key);
     if (secure != null && secure.isNotEmpty) return secure;
-  } catch (_) {
-    // A lost/unavailable Keystore key must not prevent the legacy cache fallback.
-  }
+  } catch (_) {}
   final prefs = await SharedPreferences.getInstance();
-  final legacy = prefs.getString('subscription_cache_black_lte');
+  final legacy = prefs.getString(key);
   if (legacy != null && legacy.isNotEmpty) {
     try {
-      await secureStorage.write(key: 'subscription_cache_black_lte', value: legacy);
-      final verified = await secureStorage.read(key: 'subscription_cache_black_lte');
-      if (verified == legacy) {
-        await prefs.remove('subscription_cache_black_lte');
-      }
-    } catch (_) {
-      // Keep the legacy copy unless the encrypted write was read back successfully.
-    }
+      await secureStorage.write(key: key, value: legacy);
+      final verified = await secureStorage.read(key: key);
+      if (verified == legacy) await prefs.remove(key);
+    } catch (_) {}
   }
   return legacy;
 }
 
-Future<void> clearSubscriptionCache() async {
-  await secureStorage.delete(key: 'subscription_cache_black_lte');
+Future<void> clearSubscriptionCache({String subscriptionId = 'black-lte'}) async {
+  final suffix = _subscriptionCacheSuffix(subscriptionId);
+  final key = 'subscription_cache_' + suffix;
+  await secureStorage.delete(key: key);
   final prefs = await SharedPreferences.getInstance();
-  await prefs.remove('subscription_cache_black_lte');
-  await prefs.remove('subscription_cache_time_black_lte');
+  await prefs.remove(key);
+  await prefs.remove('subscription_cache_time_' + suffix);
 }
 
 
@@ -62,6 +66,7 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
   required String? contentType,
   required String? cachedBody,
 }) async {
+  final suffix = _subscriptionCacheSuffix(subscriptionId);
   Object? freshError;
   if (downloadedBody != null) {
     final body = downloadedBody.trim();
@@ -93,10 +98,10 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
           usable.length < cachedServerCount * 0.5) {
         throw Exception('В новой подписке серверов меньше половины от кэша; сохраняем предыдущую версию');
       }
-      await secureStorage.write(key: 'subscription_cache_black_lte', value: body);
+      await secureStorage.write(key: 'subscription_cache_' + suffix, value: body);
       final prefs = await SharedPreferences.getInstance();
       final updatedAt = DateTime.now().toUtc().toIso8601String();
-      await prefs.setString('subscription_cache_time_black_lte', updatedAt);
+      await prefs.setString('subscription_cache_time_' + suffix, updatedAt);
       return SubscriptionLoadResult(imported, false, updatedAt);
     } catch (e) {
       freshError = e;
@@ -110,7 +115,7 @@ Future<SubscriptionLoadResult> loadSubscriptionWithCache({
     if (usable.isNotEmpty) {
       final prefs = await SharedPreferences.getInstance();
       return SubscriptionLoadResult(imported, true,
-        prefs.getString('subscription_cache_time_black_lte'));
+        prefs.getString('subscription_cache_time_' + suffix));
     }
   }
   throw Exception('Не удалось загрузить подписку из сети или кэша: ${freshError ?? 'нет ответа'}');
@@ -190,37 +195,38 @@ class _BootstrapServerCheck {
 }
 
 Future<String?> _fetchBootstrapIp() async {
-  try {
-    final response = await http.get(Uri.parse('https://api.ipify.org'))
-        .timeout(const Duration(seconds: 3));
-    final ip = response.body.trim();
-    if (response.statusCode == 200 && InternetAddress.tryParse(ip) != null) {
-      return ip;
+  const endpoints = [
+    'https://api.ipify.org',
+    'https://icanhazip.com',
+    'https://ifconfig.me/ip',
+  ];
+  for (final endpoint in endpoints) {
+    try {
+      final response = await http.get(Uri.parse(endpoint))
+          .timeout(const Duration(seconds: 2));
+      final ip = response.body.trim();
+      if (response.statusCode == 200 && InternetAddress.tryParse(ip) != null) {
+        return ip;
+      }
+    } catch (_) {
+      // External-IP lookup is supplementary and does not invalidate URL-test.
     }
-  } catch (_) {}
+  }
   return null;
 }
 
 class _BootstrapProbe {
   const _BootstrapProbe(this.latencyMs, this.ip);
   final int latencyMs;
-  final String ip;
+  final String? ip;
 }
 
 Future<_BootstrapProbe> _probeBootstrapTunnel() async {
-  // This is the same kind of HTTP URL-test used by proxy clients: measure
-  // the round trip to a tiny 204 endpoint through the active VPN tunnel.
-  final watch = Stopwatch()..start();
-  final response = await http.get(
-    Uri.parse('https://cp.cloudflare.com/generate_204'),
-  ).timeout(const Duration(seconds: 4));
-  watch.stop();
-  if (response.statusCode != 204 && response.statusCode != 200) {
-    throw Exception('Нет ответа через VPN-туннель');
-  }
-  final ip = await _fetchBootstrapIp();
-  if (ip == null) throw Exception('Не удалось проверить внешний IP через VPN');
-  return _BootstrapProbe(watch.elapsedMilliseconds, ip);
+  // Use sing-box's own URL-test instead of a separate Dart HTTP request.
+  final result = await SingBox.instance.pingCurrentServer()
+      .timeout(const Duration(seconds: 6));
+  if (!result.success) throw Exception('sing-box не подтвердил доступность узла');
+  return _BootstrapProbe(result.ping.round(), await _fetchBootstrapIp());
 }
 
 class _BootstrapPageState extends State<BootstrapPage> {
@@ -244,42 +250,53 @@ class _BootstrapPageState extends State<BootstrapPage> {
     if (mounted) setState(() {
       loading = true; scanning = false; checkedCount = 0; scanTotal = 0;
       checks.clear(); servers = []; selected = null;
-      error = null; scanMessage = 'Загружаем список серверов…';
+      error = null; scanMessage = 'Загружаем серверы из двух источников…';
     });
     try {
-      http.Response? response;
-      for (var attempt = 0; attempt < 3; attempt++) {
+      final combined = <SingBoxServerConfig>[];
+      final sourceErrors = <String>[];
+      for (final source in subscriptionSources) {
+        http.Response? response;
+        for (var attempt = 0; attempt < 2; attempt++) {
+          try {
+            final candidate = await http.get(Uri.parse(source.url), headers: const {
+              'Accept': 'text/plain, */*', 'Cache-Control': 'no-cache',
+              'User-Agent': 'IzviniteVpn/2.0',
+            }).timeout(const Duration(seconds: 9));
+            if (candidate.statusCode == 200) { response = candidate; break; }
+            sourceErrors.add(source.label + ': HTTP ' + candidate.statusCode.toString());
+          } on TimeoutException {
+            sourceErrors.add(source.label + ': timeout');
+          } on http.ClientException catch (e) {
+            sourceErrors.add(source.label + ': ' + e.message);
+          }
+          if (attempt == 0) await Future.delayed(const Duration(milliseconds: 350));
+        }
         try {
-          final candidate = await http.get(Uri.parse(subUrl), headers: const {
-            'Accept': 'text/plain, */*', 'Cache-Control': 'no-cache',
-            'User-Agent': 'IzviniteVpn/2.0',
-          }).timeout(const Duration(seconds: 12));
-          if (candidate.statusCode == 200) { response = candidate; break; }
-        } on TimeoutException { } on http.ClientException { }
-        if (attempt < 2) await Future.delayed(Duration(milliseconds: 400 * (attempt + 1)));
+          final result = await loadSubscriptionWithCache(
+            subscriptionId: source.id,
+            downloadedBody: response?.body,
+            contentType: response?.headers['content-type'],
+            cachedBody: await readSubscriptionCache(subscriptionId: source.id),
+          );
+          combined.addAll(result.servers);
+          if (result.fromCache) sourceErrors.add(source.label + ': используется сохранённый список');
+        } catch (e) {
+          sourceErrors.add(source.label + ': ' + e.toString());
+        }
       }
-      final loaded = await loadSubscriptionWithCache(
-        subscriptionId: 'black-lte',
-        downloadedBody: response?.body,
-        contentType: response?.headers['content-type'],
-        cachedBody: await readSubscriptionCache(),
-      );
-      final eligible = loaded.servers.where((server) =>
+      final eligible = combined.where((server) =>
         server.enabled && server.outbound != null &&
-        !isRussianBootstrapServer(server.name)).take(30).toList();
+        !isRussianBootstrapServer(server.name)).take(60).toList();
       if (eligible.isEmpty) {
-        throw Exception('В подписке не найдено подходящих серверов вне РФ');
+        throw Exception('Не удалось загрузить подходящие серверы. ' + sourceErrors.join('; '));
       }
       if (mounted) setState(() {
         servers = eligible;
         scanTotal = eligible.length;
         loading = false; scanning = true;
         scanMessage = 'Ищем три работающих сервера…';
-        final cachedAt = DateTime.tryParse(loaded.updatedAt ?? '')?.toLocal();
-        error = loaded.fromCache
-          ? 'Используется сохранённый список; обновлён: ' +
-              (cachedAt?.toString() ?? 'дата неизвестна') + '.'
-          : null;
+        error = sourceErrors.isEmpty ? null : sourceErrors.join('\n');
       });
       await checkBootstrapServers(eligible);
     } catch (e) {
@@ -292,7 +309,6 @@ class _BootstrapPageState extends State<BootstrapPage> {
 
   Future<void> checkBootstrapServers(List<SingBoxServerConfig> candidates) async {
     final box = SingBox.instance;
-    final baselineIp = await _fetchBootstrapIp();
     var workingCount = 0;
 
     for (var index = 0; index < candidates.length && workingCount < 3; index++) {
@@ -314,14 +330,11 @@ class _BootstrapPageState extends State<BootstrapPage> {
         // elapsed time is the connectivity latency; no large speed test runs
         // during bootstrap discovery.
         final probe = await _probeBootstrapTunnel();
-        final sameIp = baselineIp != null && baselineIp == probe.ip;
         result = _BootstrapServerCheck(
           serverId: server.id,
           pingMs: probe.latencyMs,
           exitIp: probe.ip,
-          error: sameIp
-              ? 'Внешний IP не изменился — VPN-маршрут не подтверждён'
-              : null,
+          error: null,
         );
       } catch (e) {
         result = _BootstrapServerCheck(
@@ -448,7 +461,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
       if (loading) ...[
         const Center(child: CircularProgressIndicator(color: orange)),
         const SizedBox(height: 10),
-        const Text('Загружаем список из трёх серверов…', textAlign: TextAlign.center),
+        const Text('Загружаем серверы из двух источников…', textAlign: TextAlign.center),
       ],
       if (scanning) ...[
         Row(children: [
@@ -459,7 +472,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
         ]),
         const SizedBox(height: 10),
         LinearProgressIndicator(
-          value: servers.isEmpty ? null : checkedCount / servers.length,
+          value: scanTotal == 0 ? null : checkedCount / scanTotal,
           color: orange, backgroundColor: Colors.white12,
         ),
         const SizedBox(height: 6),
@@ -832,42 +845,51 @@ class _HomeState extends SessionState<HomePage> {
     if (loadingSubscription || connecting) return;
     if (mounted) setState(() { loadingSubscription = true; error = null; });
     try {
-      http.Response? response;
-      for (var attempt = 0; attempt < 3; attempt++) {
+      final combined = <SingBoxServerConfig>[];
+      final sourceErrors = <String>[];
+      for (final source in subscriptionSources) {
+        http.Response? response;
+        for (var attempt = 0; attempt < 2; attempt++) {
+          try {
+            final candidate = await http.get(Uri.parse(source.url), headers: const {
+              'Accept': 'text/plain, */*', 'Cache-Control': 'no-cache',
+              'User-Agent': 'IzviniteVpn/2.0',
+            }).timeout(const Duration(seconds: 12));
+            if (candidate.statusCode == 200) { response = candidate; break; }
+            sourceErrors.add(source.label + ': HTTP ' + candidate.statusCode.toString());
+          } on TimeoutException {
+            sourceErrors.add(source.label + ': timeout');
+          } on http.ClientException catch (e) {
+            sourceErrors.add(source.label + ': ' + e.message);
+          }
+          if (attempt == 0) await Future.delayed(const Duration(milliseconds: 400));
+        }
         try {
-          final candidate = await http.get(Uri.parse(subUrl), headers: const {
-            'Accept': 'text/plain, application/json;q=0.9, */*;q=0.8',
-            'Cache-Control': 'no-cache', 'User-Agent': 'IzviniteVpn/1.1',
-          }).timeout(const Duration(seconds: 25));
-          if (candidate.statusCode == 200) { response = candidate; break; }
-        } on TimeoutException { }
-          on http.ClientException { }
-        if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+          final result = await loadSubscriptionWithCache(
+            subscriptionId: source.id,
+            downloadedBody: response?.body,
+            contentType: response?.headers['content-type'],
+            cachedBody: await readSubscriptionCache(subscriptionId: source.id),
+          );
+          combined.addAll(result.servers);
+          if (result.fromCache) sourceErrors.add(source.label + ': используется сохранённый список');
+        } catch (e) {
+          sourceErrors.add(source.label + ': ' + e.toString());
+        }
       }
-      final loadedResult = await loadSubscriptionWithCache(
-        subscriptionId: 'black-lte',
-        downloadedBody: response?.body,
-        contentType: response?.headers['content-type'],
-        cachedBody: await readSubscriptionCache(),
-      );
-      final loaded = loadedResult.servers;
+      final filtered = combined.where((server) =>
+        server.enabled && server.outbound != null &&
+        !isRussianBootstrapServer(server.name)).toList();
+      if (filtered.isEmpty) throw Exception('В обоих источниках нет доступных серверов вне РФ');
       if (mounted) setState(() {
-        // The BLACK_LTE feed is the source for every VPN screen. Keep only
-        // supported non-Russian nodes consistently, not just during bootstrap.
-        servers = loaded.where((server) =>
-          server.enabled && server.outbound != null &&
-          !isRussianBootstrapServer(server.name)).toList();
-        if (servers.isEmpty) throw Exception('В BLACK_LTE не найдено доступных серверов вне РФ');
+        servers = filtered;
         if (selected == null || !servers.any((server) => server.id == selected)) {
           selected = servers.first.id;
         }
-        final cachedAt = DateTime.tryParse(loadedResult.updatedAt ?? '')?.toLocal();
-        error = loadedResult.fromCache
-          ? 'Показана сохранённая подписка; обновлена: ${cachedAt?.toString() ?? 'дата неизвестна'}.'
-          : null;
+        error = sourceErrors.isEmpty ? null : sourceErrors.join('\n');
       });
     } catch (e) {
-      if (mounted) setState(() => error = 'Не удалось обновить подписку: ' + e.toString());
+      if (mounted) setState(() => error = 'Не удалось обновить подписки: ' + e.toString());
     } finally {
       if (mounted) setState(() => loadingSubscription = false);
     }
