@@ -199,7 +199,6 @@ class _BootstrapPageState extends State<BootstrapPage> {
         } on TimeoutException { } on http.ClientException { }
         if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
-      final prefs = await SharedPreferences.getInstance();
       final loaded = await loadSubscriptionWithCache(
         subscriptionId: 'black-lte',
         downloadedBody: response?.body,
@@ -547,10 +546,10 @@ class _HomeState extends SessionState<HomePage> {
     groupsSub = SingBox.instance.watchGroups().listen((groups) {
       final proxyGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.proxyTag).toList();
       if (proxyGroups.isEmpty) return;
-      var value = proxyGroups.first.selected?.toString();
+      var value = proxyGroups.first.selected.toString();
       if (value == SingBoxConfigBuilder.autoTag) {
         final autoGroups = groups.where((item) => item.tag == SingBoxConfigBuilder.autoTag).toList();
-        if (autoGroups.isNotEmpty) value = autoGroups.first.selected?.toString();
+        if (autoGroups.isNotEmpty) value = autoGroups.first.selected.toString();
       }
       if (value == null || value.isEmpty || value == SingBoxConfigBuilder.autoTag || !mounted) return;
       final server = _serverByOutboundTag[value];
