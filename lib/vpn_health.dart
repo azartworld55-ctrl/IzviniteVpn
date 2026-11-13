@@ -127,6 +127,9 @@ class VpnHealthController extends ChangeNotifier {
       liveUploadMbps = 0;
       errorText = null;
       if (status == SingBoxConnectionStatus.disconnected) {
+        // Refresh the baseline after every completed disconnect; the device
+        // may have changed networks since the previous VPN session.
+        realIp = null;
         _captureRealIp();
       }
     } else if (status == SingBoxConnectionStatus.connecting) {
