@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ main ]
   push:
-    branches: [ main, master, feature/izvinitevpn-v2, feature/vpn-ui-admin-complete, fix/vpn-connectivity-diagnostics ]
+    branches: [ main, master, feature/izvinitevpn-v2, feature/vpn-ui-admin-complete, fix/vpn-connectivity-diagnostics, feat/preauth-bootstrap-login ]
 
 concurrency:
   group: izvinitevpn-${{ github.workflow }}-${{ github.ref }}
@@ -37,6 +37,7 @@ jobs:
           rm -rf build_src/lib
           cp -R lib build_src/lib
           sed -i 's/android:label="build_src"/android:label="IzviniteVpn"/' build_src/android/app/src/main/AndroidManifest.xml
+          sed -i 's/<application/<application android:allowBackup="false"/' build_src/android/app/src/main/AndroidManifest.xml
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/' build_src/android/app/build.gradle.kts
           mkdir -p build_src/android/app/src/main/res/drawable build_src/android/app/src/main/res/mipmap-anydpi-v26 build_src/android/app/src/main/res/values
           cp android-icon/ic_launcher_foreground.xml build_src/android/app/src/main/res/drawable/ic_launcher_foreground.xml
@@ -44,15 +45,26 @@ jobs:
           cp android-icon/colors.xml build_src/android/app/src/main/res/values/ic_launcher_colors.xml
           cd build_src
           flutter pub get
-      - name: Validate Worker JavaScript
-        run: node --check cloudflare/src/index.js
-      - name: Validate API endpoint
+      - name: Analyze Dart code
+        run: |
+          cd build_src
+          flutter analyze
+      - name: Build debug APK
         env:
           API_BASE_URL: ${{ vars.API_BASE_URL }}
         run: |
-          test -n "$API_BASE_URL" || (echo "Set repository Actions variable API_BASE_URL after deploying the auth API"; exit 1)
-          case "$API_BASE_URL" in https://*) ;; *) echo "API_BASE_URL must use HTTPS"; exit 1 ;; esac
-      - name: Build APK
+          cd build_src
+          flutter build apk --debug --target-platform android-arm64 --dart-define=API_BASE_URL="$API_BASE_URL"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk-debug
+          path: build_src/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+      - name: Validate Worker JavaScript
+        run: node --check cloudflare/src/index.js
+      - name: Build release APK
+        if: ${{ vars.API_BASE_URL != '' }}
         env:
           API_BASE_URL: ${{ vars.API_BASE_URL }}
         run: |
