@@ -56,6 +56,160 @@ Future<String> deviceId() async {
   return id;
 }
 
+bool isRussianBootstrapServer(String name) {
+  final value = name.toLowerCase();
+  return value.contains('russia') ||
+      value.contains('росси') ||
+      value.contains('moscow') ||
+      value.contains('москва') ||
+      value.contains('🇷🇺') ||
+      value.startsWith('ru-') ||
+      value.contains('| ru');
+}
+
+class BootstrapPage extends StatefulWidget {
+  const BootstrapPage({super.key});
+  @override State<BootstrapPage> createState() => _BootstrapPageState();
+}
+
+class _BootstrapPageState extends State<BootstrapPage> {
+  List<SingBoxServerConfig> servers = [];
+  String? selected;
+  String? error;
+  bool loading = true;
+  bool connecting = false;
+
+  @override void initState() {
+    super.initState();
+    loadBootstrapServers();
+  }
+
+  Future<void> loadBootstrapServers() async {
+    if (mounted) setState(() { loading = true; error = null; });
+    try {
+      final response = await http.get(
+        Uri.parse(subUrl),
+        headers: const {
+          'Accept': 'text/plain, */*',
+          'Cache-Control': 'no-cache',
+          'User-Agent': 'IzviniteVpn/1.1',
+        },
+      ).timeout(const Duration(seconds: 25));
+      if (response.statusCode != 200) {
+        throw Exception('Источник стартовой подписки вернул HTTP ${response.statusCode}');
+      }
+      final body = response.body.trim();
+      final contentType = (response.headers['content-type'] ?? '').toLowerCase();
+      if (body.isEmpty || body.length > 2 * 1024 * 1024 ||
+          contentType.contains('text/html') ||
+          body.toLowerCase().startsWith('<!doctype html') ||
+          body.toLowerCase().startsWith('<html')) {
+        throw Exception('Источник стартовой подписки вернул некорректный ответ');
+      }
+
+      await SingBox.instance.importServerConfigs(body, subscriptionId: 'black-lte');
+      final loaded = await SingBox.instance.getServerConfigs();
+      final eligible = loaded.where((server) =>
+        server.enabled && server.outbound != null &&
+        !isRussianBootstrapServer(server.name)).take(3).toList();
+      if (eligible.isEmpty) {
+        throw Exception('В стартовой подписке не найдены доступные серверы вне РФ');
+      }
+      if (mounted) setState(() {
+        servers = eligible;
+        selected = eligible.first.id;
+        error = null;
+      });
+    } catch (e) {
+      if (mounted) setState(() => error = 'Не удалось загрузить стартовые серверы: $e');
+    } finally {
+      if (mounted) setState(() => loading = false);
+    }
+  }
+
+  Future<void> connectAndContinue() async {
+    if (connecting || servers.isEmpty) return;
+    setState(() { connecting = true; error = null; });
+    try {
+      await SingBox.instance.connectToServers(
+        servers,
+        selectedId: selected ?? servers.first.id,
+      );
+      await SingBox.instance.waitForStatus(SingBoxConnectionStatus.connected);
+
+      if (api.token != null) {
+        try {
+          final me = await api.call('GET', '/auth/me');
+          if (!mounted) return;
+          Navigator.pushReplacement(context, MaterialPageRoute(
+            builder: (_) => me['user']?['role'] == 'admin'
+              ? const AdminPage() : const HomePage()));
+          return;
+        } on ApiUnavailableException {
+          rethrow;
+        } catch (_) {
+          final p = await SharedPreferences.getInstance();
+          await p.remove('session_token');
+          api.token = null;
+        }
+      }
+
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
+    } catch (e) {
+      if (mounted) setState(() => error = 'Не удалось продолжить через выбранное подключение: $e');
+    } finally {
+      if (mounted) setState(() => connecting = false);
+    }
+  }
+
+  @override Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(title: const Text('Первоначальное подключение')),
+    body: ListView(padding: const EdgeInsets.all(22), children: [
+      const Icon(Icons.shield_outlined, color: orange, size: 64),
+      const SizedBox(height: 14),
+      const Text('Подключитесь для входа',
+        textAlign: TextAlign.center,
+        style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800)),
+      const SizedBox(height: 8),
+      const Text('Для первой авторизации доступны до трёх стартовых серверов вне РФ. После входа они больше не отображаются.',
+        textAlign: TextAlign.center, style: TextStyle(color: Colors.white60)),
+      const SizedBox(height: 20),
+      if (loading) const Center(child: CircularProgressIndicator(color: orange)),
+      if (!loading && servers.isEmpty)
+        FilledButton.tonal(onPressed: loadBootstrapServers,
+          child: const Text('Повторить загрузку серверов')),
+      ...servers.map((server) => Card(
+        color: panel,
+        child: RadioListTile<String>(
+          value: server.id,
+          groupValue: selected,
+          onChanged: connecting ? null : (value) => setState(() => selected = value),
+          title: Text(server.name),
+          subtitle: const Text('Стартовый сервер'),
+          activeColor: orange,
+        ),
+      )),
+      if (error != null) Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
+      ),
+      const SizedBox(height: 18),
+      FilledButton(
+        onPressed: loading || connecting || servers.isEmpty || apiUrl.isEmpty
+          ? null : connectAndContinue,
+        style: FilledButton.styleFrom(backgroundColor: orange, foregroundColor: Colors.black),
+        child: Text(connecting ? 'Подключение…' : 'Подключиться и продолжить'),
+      ),
+      if (apiUrl.isEmpty) const Padding(
+        padding: EdgeInsets.only(top: 12),
+        child: Text('Адрес сервера авторизации не настроен.',
+          textAlign: TextAlign.center, style: TextStyle(color: Colors.redAccent)),
+      ),
+    ]),
+  );
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SingBox.instance.initialize(const SingBoxOptions(android:SingBoxAndroidOptions(
@@ -90,15 +244,16 @@ class _SessionGateState extends State<SessionGate> {
         if (!mounted) return;
         openUser(me['user']);
         return;
-      } on ApiUnavailableException catch (e) {
-        if (mounted) setState(() { error = e.message; loading = false; });
+      } on ApiUnavailableException {
+        if (!mounted) return;
+        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const BootstrapPage()));
         return;
       } catch (_) {
         await p.remove('session_token');
         api.token = null;
       }
     }
-    if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginPage()));
+    if (mounted) Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const BootstrapPage()));
   }
   void openUser(dynamic user) {
     Navigator.pushReplacement(context, MaterialPageRoute(
