@@ -113,10 +113,17 @@ class _BootstrapPageState extends State<BootstrapPage> {
           await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
         }
       }
+      final prefs = await SharedPreferences.getInstance();
+      final String body;
       if (response == null) {
-        throw Exception('Не удалось получить стартовую подписку после 3 попыток: ${requestError ?? 'нет ответа'}');
+        final cached = prefs.getString('subscription_cache_black_lte');
+        if (cached == null || cached.trim().isEmpty) {
+          throw Exception('Не удалось получить стартовую подписку после 3 попыток и локальный кэш отсутствует: ${requestError ?? 'нет ответа'}');
+        }
+        body = cached.trim();
+      } else {
+        body = response.body.trim();
       }
-      final body = response.body.trim();
       final contentType = (response.headers['content-type'] ?? '').toLowerCase();
       if (body.isEmpty || body.length > 2 * 1024 * 1024 ||
           contentType.contains('text/html') ||
@@ -141,6 +148,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
       if (eligible.isEmpty) {
         throw Exception('В стартовой подписке не найдены доступные серверы вне РФ');
       }
+      await prefs.setString('subscription_cache_black_lte', body);
       if (mounted) setState(() {
         servers = eligible;
         selected = eligible.first.id;
@@ -586,10 +594,17 @@ class _HomeState extends SessionState<HomePage> {
         }
       }
 
+      final prefs = await SharedPreferences.getInstance();
+      final String body;
       if (response == null) {
-        throw Exception('Не удалось получить подписку после 3 попыток: ${requestError ?? 'нет ответа'}');
+        final cached = prefs.getString('subscription_cache_black_lte');
+        if (cached == null || cached.trim().isEmpty) {
+          throw Exception('Не удалось получить подписку после 3 попыток и локальный кэш отсутствует: ${requestError ?? 'нет ответа'}');
+        }
+        body = cached.trim();
+      } else {
+        body = response.body.trim();
       }
-      final body = response.body.trim();
       final contentType = (response.headers['content-type'] ?? '').toLowerCase();
       if (body.isEmpty) throw Exception('Сервер подписки вернул пустой ответ');
       if (body.length > 2 * 1024 * 1024) throw Exception('Размер подписки превышает 2 МБ');
@@ -604,6 +619,7 @@ class _HomeState extends SessionState<HomePage> {
       if (loaded.isEmpty) {
         throw Exception('Подписка загружена, но поддерживаемые серверы не найдены');
       }
+      await prefs.setString('subscription_cache_black_lte', body);
       if (mounted) setState(() {
         servers = loaded;
         if (selected == null || !servers.any((server) => server.id == selected)) {
