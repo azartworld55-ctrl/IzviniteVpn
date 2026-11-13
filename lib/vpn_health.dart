@@ -163,9 +163,17 @@ class VpnHealthController extends ChangeNotifier {
   }
 
   Future<int?> _ping() async {
+    // Measure an actual HTTPS round trip through the active VPN route,
+    // matching the URL-test style latency shown by v2rayNG more closely
+    // than a core-side ICMP/TCP probe.
+    final watch = Stopwatch()..start();
     try {
-      final result = await _singBox.pingCurrentServer();
-      return result.success ? result.ping.round() : null;
+      final response = await http.get(
+        Uri.parse('https://cp.cloudflare.com/generate_204'),
+      ).timeout(const Duration(seconds: 4));
+      watch.stop();
+      if (response.statusCode != 204 && response.statusCode != 200) return null;
+      return watch.elapsedMilliseconds;
     } catch (_) {
       return null;
     }
