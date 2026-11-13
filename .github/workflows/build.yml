@@ -71,6 +71,7 @@ jobs:
           cd build_src
           flutter build apk --release --target-platform android-arm64 --dart-define=API_BASE_URL="$API_BASE_URL"
       - uses: actions/upload-artifact@v4
+        if: ${{ vars.API_BASE_URL != '' }}
         with:
           name: IzviniteVpn-arm64-apk
           path: build_src/build/app/outputs/flutter-apk/app-release.apk
