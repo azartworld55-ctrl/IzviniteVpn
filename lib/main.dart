@@ -87,16 +87,34 @@ class _BootstrapPageState extends State<BootstrapPage> {
   Future<void> loadBootstrapServers() async {
     if (mounted) setState(() { loading = true; error = null; });
     try {
-      final response = await http.get(
-        Uri.parse(subUrl),
-        headers: const {
-          'Accept': 'text/plain, */*',
-          'Cache-Control': 'no-cache',
-          'User-Agent': 'IzviniteVpn/1.1',
-        },
-      ).timeout(const Duration(seconds: 25));
-      if (response.statusCode != 200) {
-        throw Exception('Источник стартовой подписки вернул HTTP ${response.statusCode}');
+      http.Response? response;
+      Object? requestError;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          final candidate = await http.get(
+            Uri.parse(subUrl),
+            headers: const {
+              'Accept': 'text/plain, */*',
+              'Cache-Control': 'no-cache',
+              'User-Agent': 'IzviniteVpn/1.1',
+            },
+          ).timeout(const Duration(seconds: 25));
+          if (candidate.statusCode == 200) {
+            response = candidate;
+            break;
+          }
+          requestError = Exception('HTTP ${candidate.statusCode}');
+        } on TimeoutException catch (e) {
+          requestError = e;
+        } on http.ClientException catch (e) {
+          requestError = e;
+        }
+        if (attempt < 2) {
+          await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+        }
+      }
+      if (response == null) {
+        throw Exception('Не удалось получить стартовую подписку после 3 попыток: ${requestError ?? 'нет ответа'}');
       }
       final body = response.body.trim();
       final contentType = (response.headers['content-type'] ?? '').toLowerCase();
