@@ -146,7 +146,7 @@ class _BootstrapPageState extends State<BootstrapPage> {
             'User-Agent': 'IzviniteVpn/1.1',
           }).timeout(const Duration(seconds: 25));
           if (candidate.statusCode == 200) { response = candidate; break; }
-        } on TimeoutException catch (e) { requestError = e; }
+        } on TimeoutException { }
           on http.ClientException { }
         if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
@@ -584,9 +584,8 @@ class _HomeState extends SessionState<HomePage> {
             'Cache-Control': 'no-cache', 'User-Agent': 'IzviniteVpn/1.1',
           }).timeout(const Duration(seconds: 25));
           if (candidate.statusCode == 200) { response = candidate; break; }
-          requestError = Exception('HTTP ${candidate.statusCode}');
-        } on TimeoutException catch (e) { requestError = e; }
-          on http.ClientException catch (e) { requestError = e; }
+        } on TimeoutException { }
+          on http.ClientException { }
         if (attempt < 2) await Future.delayed(Duration(milliseconds: 600 * (attempt + 1)));
       }
       final prefs = await SharedPreferences.getInstance();
@@ -594,7 +593,7 @@ class _HomeState extends SessionState<HomePage> {
         subscriptionId: 'black-lte',
         downloadedBody: response?.body,
         contentType: response?.headers['content-type'],
-        cachedBody: prefs.getString('subscription_cache_black-lte'),
+        cachedBody: prefs.getString('subscription_cache_black_lte'),
       );
       final loaded = loadedResult.servers;
       if (mounted) setState(() {
